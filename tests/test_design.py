@@ -156,6 +156,26 @@ def test_emulation_energy_balance():
     assert np.allclose(tr.P_bat + tr.P_sc - tr.P_load, 0, atol=1e-6)
 
 
+def test_emulation_voltage_limit_battery_takes_over():
+    """At U_C0min the SC delivers no further current, the battery covers the load (hard limit, like I_C0max)."""
+    t = np.arange(0, 60, 0.001)
+    p = np.full_like(t, 600.0)
+    pb = np.zeros_like(p)                                     # split gives everything to the SC
+    m = ModuleModel(S=23, P=1, C_cell_F=30, R_cell_Ohm=0.026, U_min=33, U_max=48, U_init=42, I_max_A=77.7,
+                    R_th=22.1, C_th=19.7)
+    em = HESSEmulator(t, p, pb, m, EmulationConfig())
+    assert not em.cfg.soc_control
+    s, tr = em.run_cycle()
+    at = tr.U_sc <= 33.0 + 1e-9
+    assert s.t_at_Umin_s > 10 and at.any()
+    assert np.allclose(tr.I_sc[at][1:], 0.0, atol=1e-9)
+    assert np.allclose(tr.P_bat[at][1:], 600.0)
+    assert np.allclose(tr.P_bat + tr.P_sc - tr.P_load, 0, atol=1e-6)
+    assert tr.U_sc.min() >= 33.0 - 1e-6
+    i_cell = em.cell_current_full(tr, p, pb, 0.001)
+    assert np.allclose(i_cell[-1000:], 0.0)
+
+
 # ---------------------------------------------------------------------- converter, current, thermal chain
 def test_converter_efficiency():
     from sc_module_design.converter import bus_to_cell
@@ -194,9 +214,11 @@ def test_emulation_design_and_thermal_chain():
     from sc_module_design.emudesign import emulation_design
     r = run_design(load_preset("thesis_characterized"))
     d = emulation_design(r, "profile", "VISHAY_HVR235_50F", check_eol=False)
-    assert d.feasible and d.P_final >= d.P_analytic
-    assert d.chain is not None and d.chain["dT_max"] <= r.inputs.req.dT_max_K
-    assert np.all(d.chain["p_v"] >= 0)
+    # the emulation only checks: P stays as in the flowchart, one pass, no recharge controller
+    assert d.P_final == d.P_analytic and len(d.iterations) == 1
+    assert np.all(d.trace.P_rech == 0)
+    assert d.chain is not None and np.all(d.chain["p_v"] >= 0)
+    assert d.history[-1].U_start == pytest.approx(r.scenarios["profile"].U_inM)
 
 
 # ---------------------------------------------------------------------- PCB layout
@@ -368,8 +390,9 @@ def test_emulation_uses_same_thermal_network():
     row = r.candidates["profile_braking"].set_index("cell_id").loc["VISHAY_HVR235_50F"]
     d = emulation_design(r, "profile_braking", "VISHAY_HVR235_50F")
     it0 = d.iterations[0]
-    assert it0.P == row.P
-    # same model, same P: network result of the emulation within 10 % of the thermal page (current differs slightly)
-    assert it0.dT_net_max_K == pytest.approx(row.dT_net_max_K, rel=0.1)
-    assert it0.dT_block_max_K == pytest.approx(row.dT_max_K, rel=0.1)
-    assert d.iterations[-1].dT_max_K <= r.inputs.req.dT_max_K
+    assert it0.P == row.P == d.P_final and len(d.iterations) == 1
+    # same model, same P. The thermal page assumes the current continuously, in the emulation the SC carries no
+    # current while U_C0min is reached: the emulation is at most slightly above and not far below the thermal page
+    assert 0.75 * row.dT_net_max_K < it0.dT_net_max_K < 1.05 * row.dT_net_max_K
+    assert 0.75 * row.dT_max_K < it0.dT_block_max_K < 1.05 * row.dT_max_K
+    assert it0.dT_net_max_K > it0.dT_block_max_K

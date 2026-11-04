@@ -174,7 +174,7 @@ def export_run(res, out_dir: Optional[str | Path] = None, figures: bool = True, 
                     if df is None or sel.get("cell_id") not in set(df.cell_id):
                         continue
                     row = df[df.cell_id == sel["cell_id"]].iloc[0]
-                    P = int(sel.get("P") or row.P)
+                    P = int(row.P)                  # P from the flowchart (the emulation only checks)
                     cell = db.cell(row.cell_id)
                     sq, hx = layout_pair(cell, int(row.S), P, res.inputs.opt, res.inputs.req)
                     if sq is not None:

@@ -86,15 +86,17 @@ Nachbarschichten (Schichtkonvergenz, Aufheizen). Schalter auf der Startseite. Ve
 Blockmodell und mit eigenen Messwerten auf Seite 6. Optional als Auslegungskriterium (P erhöhen, bis die heißeste
 Zelle unter ΔT_max liegt).
 
-### Emulationsbasierte Auslegung
+### Emulation (Prüfung, Schritt 14)
 
+Die Emulation prüft das Modul aus dem Flussdiagramm, P und S werden nicht verändert. Das Profil läuft einmal ab
+U_C0inM (vorgeladen), Aufteilung wie in Schritt 2 (der Split lädt den SC nach, kein eigener Nachladeregler).
 Je Zeitschritt: Leistung am SC aus der Busleistung mit Wirkungsgrad (Entladen P_Bus / η_dch, Laden P_Bus η_ch),
 Strom aus der Leistungsbilanz P = U_SC I_SC mit U_SC = U_C - R_ESR I_SC, also
 I_SC = (U_C - sqrt(U_C² - 4 R_ESR P)) / (2 R_ESR) mit der Leistungsgrenze P ≤ U_C² / (4 R_ESR).
-Aus dem emulierten Profil: Energiehub, C_req,emu, Spitzen- und RMS-Strom, Zelltemperatur aus
-p_v = i_Zelle² R_ESR und dem thermischen Tiefpass erster Ordnung. P wird erhöht, bis weder U_C0min/U_C0max noch
-die Strom- oder Leistungsgrenze erreicht werden und ΔT eingehalten ist. Standard ist die Prüfung am Lebensende
-(C x L_EOL, ESR x 2).
+Stromgrenze I_C0max hart; an U_C0min bzw. U_C0max fließt kein weiterer SC-Strom. In allen Fällen liefert bzw.
+nimmt die Batterie den Rest. Ausgegeben werden Zeit an den Spannungsgrenzen, von der Batterie übernommene Energie,
+ESR-Verluste, Spitzen- und RMS-Strom und die Zelltemperatur (gleiches Modell wie Seite 6, periodischer Zustand).
+Überschreitungen erscheinen als rote Hinweise. Standard ist die Prüfung am Lebensende (C x L_EOL, ESR x 2).
 
 ### ESR-Verluste in der Energieauslegung
 
@@ -126,7 +128,7 @@ Volumen = Platine x (Zelllänge + Leiterplatte + Abstand), daraus die Moduldicht
 | 7 bis 10 Thermik | app_thermal_rms_limit, app_parallel_thermal, app_transient_thermal_model | `thermal.py`, `selection.py` |
 | 12 Trade-off | Tab. results, Fig. modules Cells | `tradeoff.py`, `plotting.fig_tradeoff`, `report.latex_results_table` |
 | 13 Balancing | (Schnittstelle) | `balancing.py` |
-| Thermische Simulation | Endlosschleife, emulationsbasierte Auslegung | `emulation.py`, `emudesign.py`, `current.py` |
+| Thermische Simulation | Emulation als Prüfung (P unverändert), Live-Endlosschleife | `emulation.py`, `emudesign.py`, `current.py` |
 | Mechanik | Leiterplatten-Layout | `layout.py` |
 
 Ablaufsteuerung mit Status je Schritt: `pipeline.run_design`.

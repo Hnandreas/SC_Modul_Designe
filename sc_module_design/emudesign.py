@@ -1,19 +1,17 @@
-"""Emulation-based module design (closed loop).
+"""Emulation check of the module from the flowchart (step 14).
 
-The analytic procedure (steps 1 to 11) gives a first P. Then the HESS is emulated with the load profile
-repeated endlessly (converter efficiency per time step, ESR losses, recharge controller, current and
-voltage limits, cell temperature) and the requirements are re-derived from the emulated SC profile:
+The analytic procedure (steps 1 to 11) gives S and P. The emulation runs the load profile once from the precharged
+state U_C0inM with the split of step 2 (e.g. moving average, it recharges the SC; no extra recharge controller) and
+checks this module, P is NOT changed:
 
-    W_swing   = max(E_SC) - min(E_SC) in the periodic cycle          (stored-energy swing)
-    C_req,emu = 2 W_swing / (L_EOL (U_C0max^2 - U_C0min^2))
-    P_C,emu   = ceil(S C_req,emu / C_cell)
-    P_I,emu   = ceil(min(I_peak, I_C0max) / I_cell,max)
-    dT_max    from the emulated cell losses (R_th,eff, C_th)
+    per time step: converter efficiency, I = P/U with the ESR drop, ESR losses, current limit I_C0max (hard, the
+    battery delivers the rest), voltage limits U_C0min / U_C0max (no SC current at the limit, the battery delivers
+    or takes the rest), cell temperature from the emulated cell current (same thermal model as step 7 to 10,
+    periodic state of the repeated profile).
 
-P is increased until no voltage limit is reached, P >= P_C,emu, P_I,emu and dT_max <= dT_max,limit.
-The converter current limit I_C0max is hard: above it (and above the power limit U_C^2/(4R)) the battery delivers
-the rest; this is reported (time, energy) but does not increase P.
-The check runs at end of life by default (C x L_EOL, ESR x factor), the condition C_req is sized for.
+Reported: time at U_C0min / U_C0max, energy taken over by the battery, ESR losses, cell RMS current, dT (block and
+network). The check runs at end of life by default (C x L_EOL, ESR x factor).
+increase_P=True keeps the old iterative study (P increased until all checks pass); it is not used by the GUI.
 """
 from __future__ import annotations
 
@@ -103,7 +101,15 @@ def _module(row: dict, cell: dict, sc, P: int, req, opt, i_c0max: float) -> Modu
 def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationConfig] = None,
                      check_eol: bool = True, include_braking: Optional[bool] = None,
                      braking_at_s: Optional[float] = None, max_iter: int = 40,
-                     db: Optional[Database] = None) -> EmuDesign:
+                     db: Optional[Database] = None, P: Optional[int] = None, increase_P: bool = False,
+                     single_pass: bool = True) -> EmuDesign:
+    """Emulation check of a configuration.
+
+    Default: the module of step 5 (P from the flowchart, or P given) is only checked, P is NOT changed.
+    single_pass: the profile runs once from the precharged state U_C0inM (the split recharges the SC; with the
+    legacy moving average the edge windows need the precharge energy). increase_P=True runs the old
+    iterative study (P is increased until all checks pass), only on explicit request.
+    """
     db = db or get_database()
     inp, req, opt = res.inputs, res.inputs.req, res.inputs.opt
     sc = res.scenarios[scenario]
@@ -119,26 +125,31 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
     cfg.L_EOL = req.L_EOL
     prof = res.profile
     t, p_load, p_bat = prof.t, prof.p, res.p_bat
-    out = EmuDesign(cell_id, scenario, S, int(row["P"]), int(row["P"]), False)
+    P0 = int(P) if P else int(row["P"])
+    out = EmuDesign(cell_id, scenario, S, P0, P0, False)
     if include_braking is None:
         include_braking = scenario == "profile_braking" and inp.braking.enabled
     if include_braking:
         if braking_at_s is None:
-            em0 = HESSEmulator(t, p_load, p_bat, _module(row, cell, sc, int(row["P"]), req, opt, req.I_C0max_A), cfg)
-            _, tr0 = em0.run_until_steady(max_cycles=60)
+            em0 = HESSEmulator(t, p_load, p_bat, _module(row, cell, sc, P0, req, opt, req.I_C0max_A), cfg)
+            _, tr0 = em0.run_cycle() if single_pass else em0.run_until_steady(max_cycles=60)
             braking_at_s = float(tr0.t[int(np.argmax(tr0.E_sc))] - tr0.t[0])
-            out.notes.append(f"Bremsereignis bei t = {braking_at_s:.1f} s (Zeitpunkt maximaler SC-Energie im "
-                             f"periodischen Zyklus, ungünstigster Fall).")
+            out.notes.append(f"Bremsereignis bei t = {braking_at_s:.1f} s (Zeitpunkt maximaler SC-Energie, "
+                             f"ungünstigster Fall).")
         E_b = res.load.get("E_brake_bus_J", res.load.get("E_brake_J", 0.0))
         p_load = add_braking_event(t, p_load, braking_at_s, E_b, inp.braking.t_brake_s)
         out.braking_at_s = braking_at_s
-    P = int(row["P"])
+    P = P0
     seen = set()
     L = req.L_EOL if check_eol else 1.0
     for _ in range(max_iter):
         mod = _module(row, cell, sc, P, req, opt, req.I_C0max_A)
         em = HESSEmulator(t, p_load, p_bat, mod, cfg)
-        hist, tr = em.run_until_steady()
+        if single_pass:
+            s1, tr = em.run_cycle()
+            hist = [s1]
+        else:
+            hist, tr = em.run_until_steady()
         last = hist[-1]
         W = last.E_swing_J
         C_req_emu = 2.0 * W / (L * (sc.U_max ** 2 - sc.U_min ** 2))
@@ -167,12 +178,12 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         dTm = dT_net if netr else dT_block
         reasons = []
         if last.t_at_Umin_s > 0:
-            reasons.append(f"U_C0min {last.t_at_Umin_s:.2f} s erreicht")
+            reasons.append(f"U_C0min {last.t_at_Umin_s:.2f} s erreicht (Batterie übernimmt)")
         if last.t_at_Umax_s > 0:
-            reasons.append(f"U_C0max {last.t_at_Umax_s:.2f} s erreicht")
-        if P < P_C_emu:
+            reasons.append(f"U_C0max {last.t_at_Umax_s:.2f} s erreicht (Batterie übernimmt)")
+        if increase_P and P < P_C_emu:
             reasons.append(f"P < P_C,emu = {P_C_emu}")
-        if P < P_I_emu:
+        if increase_P and P < P_I_emu:
             reasons.append(f"P < P_I,emu = {P_I_emu}")
         # current limit I_C0max (hard) and power limit U_C^2/(4R): the SC delivers what it can, the battery the
         # rest (overflow). Reported, but not a reason to increase P.
@@ -192,8 +203,8 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             E_overflow_J=last.E_overflow_J, E_loss_esr_J=last.E_loss_J, E_loss_conv_J=last.E_conv_loss_J,
             cycles=len(hist), ok=ok, reason="erfüllt" if ok else "; ".join(reasons)))
         out.trace, out.history, out.module, out.chain, out.net = tr, hist, mod, chain, netr
-        if ok:
-            out.P_final, out.feasible = P, True
+        if ok or not increase_P:
+            out.P_final, out.feasible = P, ok
             break
         seen.add(P)
         P_next = max(P + 1, P_C_emu, P_I_emu)
@@ -202,6 +213,6 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             break
         P = P_next
     out.P_final = P
-    if out.iterations and not out.iterations[-1].ok and not out.notes:
+    if increase_P and out.iterations and not out.iterations[-1].ok and not out.notes:
         out.notes.append("Maximale Iterationszahl erreicht.")
     return out

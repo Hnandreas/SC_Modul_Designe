@@ -70,7 +70,7 @@ PAGES = [
     ("thermik", "6  Thermik", ["th"]),
     ("tradeoff", "7  Bewertung und Auswahl", ["12"]),
     ("balancing", "Balancing", ["13"]),
-    ("emulation", "8  Emulation und Auslegung", ["14"]),
+    ("emulation", "8  Emulation (Prüfung)", ["14"]),
     ("detail", "Zelldetail", []),
     ("db", "Datenbank", ["db"]),
     ("export", "Export", []),
@@ -282,7 +282,7 @@ def page_start():
                 df = res.candidates.get(sk)
                 if cid and df is not None and (df.cell_id == cid).any():
                     r = df[df.cell_id == cid].iloc[0]
-                    pf = (inp.selected[sk] or {}).get("P")
+                    pf = None                       # P always from the flowchart (the emulation only checks)
                     m = st.columns(4)
                     m[0].metric("Zelle", ui.short(cid))
                     m[1].metric("P/S", f"{pf}/{r.S}" if pf else r.setup,
@@ -1225,10 +1225,12 @@ def page_tradeoff():
 
 
 def page_emulation():
-    ui.step_header("THERMISCHE SIMULATION", "Emulation und emulationsbasierte Auslegung",
-                   "Das Profil läuft endlos. Je Zeitschritt: Wandler-Wirkungsgrad, I = P/U, ESR-Verluste, Nachladung, "
-                   "Spannungs- und Stromgrenzen, Zelltemperatur. Aus dem emulierten SC-Profil werden Energiehub, "
-                   "C_req, Spitzen- und RMS-Strom neu bestimmt und P erhöht, bis alles eingehalten ist.")
+    ui.step_header("THERMISCHE SIMULATION", "Emulation: Prüfung des Moduls aus dem Flussdiagramm",
+                   "P und S bleiben wie in Schritt 5 bis 11, die Emulation ändert nichts. Das Profil läuft einmal ab "
+                   "U_C0inM (vorgeladen), Aufteilung wie in Schritt 2 (der Split lädt den SC nach, kein eigener "
+                   "Nachladeregler). Je Zeitschritt: Wandler-Wirkungsgrad, I aus P und Klemmenspannung U_C - R I, "
+                   "ESR-Verluste, Stromgrenze I_C0max und Spannungsgrenzen (dort liefert die Batterie den Rest), "
+                   "Zelltemperatur mit demselben Modell wie Seite 6.")
     res = compute()
     if res.profile is None or not res.candidates:
         st.info("Für die Emulation werden ein Lastprofil und Kandidaten benötigt.")
@@ -1277,26 +1279,19 @@ def page_emulation():
         c[3].caption(f"Busströme mit U = {u_bus_used:g} V. Thermik: "
                      f"{'Netzwerk (heißeste Zelle)' if inp.opt.thermal_network else 'Blockmodell'}, ESR x "
                      f"{inp.opt.thermal_esr_factor:g} wie auf Seite 6.")
-        with st.expander("Nachladeregler (Energiemanagement)"):
-            c = st.columns(3)
-            K = c[0].number_input("K [1/s]", value=0.05, format="%.3f", key=W.key("emu_K"))
-            Prm = c[1].number_input("max. Nachladeleistung [W]", value=300.0, key=W.key("emu_prm"))
-            tgt = c[2].selectbox("Ziel", ["U_C0inM", "U_C0max"], key=W.key("emu_tgt"))
-    cfg_key = json.dumps(dict(sk=sk, cells=cells, eta=(eta_d, eta_c), eol=eol, brk=brk, dt=dtb, K=K, P=Prm, t=tgt,
-                              ub=u_bus_used,
+    cfg_key = json.dumps(dict(sk=sk, cells=cells, eta=(eta_d, eta_c), eol=eol, brk=brk, dt=dtb, ub=u_bus_used,
                               inp=yaml.safe_dump({**inp.to_dict(), "selected": {}}, sort_keys=True)), sort_keys=True)
-    if st.button("Emulationsbasierte Auslegung rechnen", type="primary"):
+    if st.button("Emulation rechnen (Prüfung bei P aus Schritt 5)", type="primary"):
         out = {}
         with st.spinner("Emuliere ..."):
             for cid in cells:
-                cfg = EmulationConfig(dt_bin_s=dtb, K_soc_per_s=K, P_rech_max_W=Prm, soc_target=tgt,
-                                      eta_dch=eta_d / 100, eta_ch=eta_c / 100, U_conv_min_V=inp.req.U_conv_min_V,
-                                      U_bus_V=u_bus_used)
+                cfg = EmulationConfig(dt_bin_s=dtb, soc_control=False, eta_dch=eta_d / 100, eta_ch=eta_c / 100,
+                                      U_conv_min_V=inp.req.U_conv_min_V, U_bus_V=u_bus_used)
                 out[cid] = emulation_design(res, sk, cid, cfg, check_eol=eol, include_braking=brk)
         st.session_state["emu_result"] = (cfg_key, out)
     stored = st.session_state.get("emu_result")
     if not stored:
-        st.info("Einstellungen prüfen und auf 'Emulationsbasierte Auslegung rechnen' klicken.")
+        st.info("Einstellungen prüfen und auf 'Emulation rechnen' klicken.")
         return
     if stored[0] != cfg_key:
         ui.warn("Einstellungen geändert: Ergebnisse unten gehören zu den vorherigen Einstellungen. Neu rechnen.")
@@ -1310,26 +1305,34 @@ def page_emulation():
         n = d.S * d.P_final
         lay = layout_for(cell, d.S, d.P_final, inp.opt, inp.req)
         m_mod = n * cell["mass_g"] / 1000 + (lay.pcb_mass_kg(inp.opt.pcb_areal_mass_g_cm2) if lay else 0.0)
-        rows.append({"Zelle": ui.short(cid), "P/S analytisch": crow.setup, "P/S Emulation": f"{d.P_final}/{d.S}",
+        rows.append({"Zelle": ui.short(cid), "P/S (Schritt 5)": f"{d.P_final}/{d.S}",
                      "Zellen": n, "Kosten [€]": n * cell["price_EUR"], "Masse [kg]": m_mod,
                      "Modulvolumen [dm³]": lay.volume_dm3 if lay else float("nan"),
                      "Platine [mm]": f"{lay.width_mm:.0f} x {lay.depth_mm:.0f}" if lay else "",
-                     "Energiehub [J]": last.E_swing_J, "C_req,emu [F]": last.C_req_emu_F,
-                     "C Modul [F]": last.C_module_F, "I_peak [A]": last.I_peak_A,
+                     "C Modul [F]": last.C_module_F, "U min / max [V]": f"{last.U_op_min_V:.1f} / {last.U_op_max_V:.1f}",
+                     "t an U_C0min [s]": last.t_at_Umin_s, "Batterie übernimmt [J]": last.E_overflow_J,
+                     "ESR-Verlust [J]": last.E_loss_esr_J, "I_peak [A]": last.I_peak_A,
                      "I_Zelle RMS [A]": last.I_rms_cell_A, "ΔT Block [K]": last.dT_block_max_K,
                      "ΔT Netzwerk heißeste [K]": last.dT_net_max_K,
                      "Ergebnis": "erfüllt" if d.feasible else last.reason})
-    st.markdown("#### Ergebnis")
+    st.markdown("#### Ergebnis (Prüfung, P unverändert)")
     st.dataframe(pd.DataFrame(rows).round(2), hide_index=True, width="stretch")
-    st.latex(r"W_\mathrm{swing}=\max E_\mathrm{SC}(t)-\min E_\mathrm{SC}(t),\quad C_\mathrm{req,emu}="
-             r"\frac{2W_\mathrm{swing}}{L_\mathrm{EOL}\left(U_\mathrm{C0max}^2-U_\mathrm{C0min}^2\right)},\quad "
-             r"I_\mathrm{SC}(t)=\frac{P_\mathrm{SC,Zelle}(t)}{U_\mathrm{SC}(t)},\quad P_\mathrm{SC,Zelle}="
-             r"\begin{cases}P_\mathrm{SC,Bus}/\eta_\mathrm{dch}\\P_\mathrm{SC,Bus}\,\eta_\mathrm{ch}\end{cases}")
+    for cid, d in out.items():
+        if not d.feasible:
+            ui.warn(f"{ui.short(cid)} {d.P_final}/{d.S}: {d.iterations[-1].reason}. Hinweis, P wird nicht geändert.")
+    st.latex(r"P_\mathrm{SC,Zelle}=\begin{cases}P_\mathrm{SC,Bus}/\eta_\mathrm{dch}\\P_\mathrm{SC,Bus}\,"
+             r"\eta_\mathrm{ch}\end{cases},\quad I_\mathrm{SC}=\frac{U_\mathrm{C}-\sqrt{U_\mathrm{C}^2-4RP_"
+             r"\mathrm{SC,Zelle}}}{2R},\quad \frac{\mathrm{d}E_\mathrm{SC}}{\mathrm{d}t}=-\left(P_\mathrm{SC,Zelle}"
+             r"+RI_\mathrm{SC}^2\right),\quad E_\mathrm{SC}(0)=\tfrac{1}{2}C\,U_\mathrm{C0inM}^2")
+    st.caption("An U_C0min bzw. U_C0max fließt kein weiterer SC-Strom, die Batterie liefert bzw. nimmt den Rest "
+               "(wie bei der Stromgrenze I_C0max). Der Split sieht nur die Last, die ESR-Verluste des SC werden "
+               "dadurch nicht nachgeladen.")
     for cid, d in out.items():
         with st.expander(f"{ui.short(cid)}: emuliertes Profil und Rechnung", expanded=cid == cells[0]):
             for n in d.notes:
                 st.caption(n)
-            it = pd.DataFrame([asdict(i) for i in d.iterations])
+            it = pd.DataFrame([asdict(i) for i in d.iterations]).drop(
+                columns=["C_req_emu_F", "P_C_emu", "P_I_emu", "cycles", "ok"], errors="ignore")
             it = it.rename(columns={"P": "P", "C_module_F": "C Modul [F]", "C_module_eol_F": "C Modul EOL [F]",
                                     "U_op_min_V": "U min [V]", "U_op_max_V": "U max [V]",
                                     "E_swing_J": "Energiehub [J]", "C_req_emu_F": "C_req,emu [F]",
@@ -1349,12 +1352,12 @@ def page_emulation():
                 st.caption(f"Abgleich bei P = {it0.P} (analytisch): Seite 6 Netzwerk {ui.fmt(ref_net, 1, 'K')}, Block "
                            f"{ui.fmt(trow.dT_max_K, 1, 'K')} | Emulation Netzwerk {ui.fmt(it0.dT_net_max_K, 1, 'K')}, "
                            f"Block {ui.fmt(it0.dT_block_max_K, 1, 'K')}. Unterschied nur durch den emulierten "
-                           f"Strom (Nachladeregler, Spannungsverlauf).")
+                           f"Strom (Spannungsverlauf, kein SC-Strom an U_C0min).")
             ui.show_fig(pl.fig_emulated_profile(d.trace, d.module, sc, i_limit=d.module.I_max_A,
                                                 u_conv_min=inp.req.U_conv_min_V, u_bus=inp.req.U_bus_V,
                                                 u_bus_used=u_bus_used, thermal=th_on, net=d.net),
                         f"emulated_profile_{cid}_{d.P_final}", plt_module=pl.plt,
-                        fx_keys=["eta", "I_sc", "P_limit", "U_term", "P_rech", "th_first"])
+                        fx_keys=["eta", "I_sc", "P_limit", "U_lim", "U_term", "th_first"])
             if d.chain is not None and th_on:
                 ch = d.chain
                 st.markdown("**Zelltemperatur aus dem Zellstrom** (volle Auflösung, je Zeitschritt)")
@@ -1389,30 +1392,20 @@ def page_emulation():
                     ui.show_fig(pl.fig_network_heatmap(nt["steady"], extent=layout_extent(res)),
                                 f"emu_network_{ui.short(cid).replace(' ', '_')}_{d.P_final}", plt_module=pl.plt,
                                 fx_keys=["net", "R_gap", "Q_rad"])
-            c1, c2 = st.columns(2)
-            ui.show_fig(pl.fig_emudesign(d.iterations, inp.req.dT_max_K), f"emudesign_{cid}", container=c1,
-                        plt_module=pl.plt, fx_keys=["W_swing", "P_C", "P_I", "th_first"])
-            with c2:
-                st.markdown("**Als Endauslegung übernehmen**")
-                st.caption(f"{ui.short(cid)} mit P = {d.P_final}, S = {d.S} ({d.S * d.P_final} Zellen)")
-                if st.button("Übernehmen", key=W.key(f"emu_take_{cid}"), type="primary"):
-                    last = d.iterations[-1]
-                    inp.selected[sk] = {"cell_id": cid, "P": int(d.P_final), "dT_max_K": float(last.dT_max_K),
-                                        "C_module_F": float(last.C_module_F), "source": "emulation"}
-                    st.success("Übernommen.")
-                csv = io.StringIO()
-                pd.DataFrame({"t_s": d.trace.t - d.trace.t[0], "P_load_W": d.trace.P_load, "P_bat_W": d.trace.P_bat,
-                              "P_sc_bus_W": d.trace.P_sc, "P_sc_cell_W": d.trace.P_sc_cell, "I_sc_A": d.trace.I_sc,
-                              "I_sc_rms_A": d.trace.I_sc_rms, "U_sc_V": d.trace.U_sc, "E_sc_J": d.trace.E_sc,
-                              "dT_K": d.trace.dT}).to_csv(csv, index=False)
-                st.download_button("Emuliertes Profil als CSV", csv.getvalue(), file_name=f"emulated_{cid}.csv",
-                                   key=W.key(f"emu_csv_{cid}"))
+            csv = io.StringIO()
+            pd.DataFrame({"t_s": d.trace.t - d.trace.t[0], "P_load_W": d.trace.P_load, "P_bat_W": d.trace.P_bat,
+                          "P_sc_bus_W": d.trace.P_sc, "P_sc_cell_W": d.trace.P_sc_cell, "I_sc_A": d.trace.I_sc,
+                          "I_sc_rms_A": d.trace.I_sc_rms, "U_sc_V": d.trace.U_sc, "E_sc_J": d.trace.E_sc,
+                          "dT_K": d.trace.dT}).to_csv(csv, index=False)
+            st.download_button("Emuliertes Profil als CSV", csv.getvalue(), file_name=f"emulated_{cid}.csv",
+                               key=W.key(f"emu_csv_{cid}"))
     live_section(out[cells[0]], sc)
     nav_buttons("emulation")
 
 
 def live_section(d, sc):
     st.markdown("#### Live-Ansicht (Endlosschleife)")
+    st.caption("Profil wiederholt, Aufteilung wie Schritt 2, kein Nachladeregler.")
     prof = compute().profile
     res = compute()
     c = st.columns(4)
@@ -1424,7 +1417,7 @@ def live_section(d, sc):
         st.session_state.pop("live_buf", None)
     if live and "live_emu" not in st.session_state:
         em = HESSEmulator(prof.t, prof.p, res.p_bat, d.module,
-                          EmulationConfig(eta_dch=inp.req.eta_dch, eta_ch=inp.req.eta_ch))
+                          EmulationConfig(eta_dch=inp.req.eta_dch, eta_ch=inp.req.eta_ch, soc_control=False))
         if d.chain:
             em.dT = float(d.chain["dT0"])          # start in the thermal periodic steady state
         st.session_state["live_emu"] = em
