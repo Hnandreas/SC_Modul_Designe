@@ -112,7 +112,9 @@ def flowchart(status: dict, page: str, key: str, width: int | str = "stretch") -
     im = render(tuple(sorted(status.items())), page)
     if streamlit_image_coordinates is None:
         st.image(im, width=width if isinstance(width, int) else "stretch")
-        st.caption("Zum Anklicken: pip install streamlit-image-coordinates")
+        st.error("Flussdiagramm nicht anklickbar: Paket streamlit-image-coordinates fehlt. GUI beenden und "
+                 "./run_gui.sh neu starten (installiert fehlende Pakete) oder ./setup_env.sh ausführen.",
+                 icon=":material/warning:")
         return None
     val = streamlit_image_coordinates(im, key=key, width=width, cursor="pointer")
     if not val:
