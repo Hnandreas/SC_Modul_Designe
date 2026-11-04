@@ -50,18 +50,41 @@ Geführter Ablauf, eine Seite je Schritt des Flussdiagramms (Seitenleiste links,
 | Seite | Inhalt |
 |---|---|
 | Start und Überblick | Flussdiagramm mit Status, gewähltes Modul, Kennwerte, Presets laden/speichern |
-| 1 Lastprofil | Profil wählen/hochladen, Skalierung, Zeitfenster, manuelle Werte, Peak-Statistik, FFT |
-| 2 Leistungsaufteilung | Filter (Moving Average, Peak-Shaver, Tiefpass, Butterworth, Rate-Limiter, eigener Ausdruck, Plugins), Filtervergleich, Wandler-Wirkungsgrad Laden/Entladen, Bremsereignis |
-| 3 Spannungen und Lebensdauer | U_Bus, U_C0max, Derating, S, U_C0min, U_C0inM |
+| 1 Lastprofil und Bauraum | Bauraum und Vorgaben, Profil wählen/hochladen, Skalierung, Zeitfenster, manuelle Werte, Peak-Statistik, FFT |
+| 2 Leistungsaufteilung | Filter (Moving Average, Peak-Shaver, Tiefpass, Butterworth, Rate-Limiter, eigener Ausdruck, Plugins), Filtervergleich, Wandler-Wirkungsgrad Laden/Entladen, Bremsereignis, Precharge-Energie |
+| 3 Spannungen und Wandlerstrom | U_Bus, U_C0max, Derating, S, U_C0min über r_Q, Wandlerstrom-Empfehlung mit Bestätigung, U_C0inM |
 | 4 Kapazität | L_EOL, Szenarien (Module 1: Profil, Module 2: mit Bremsenergie), C_req |
-| 5 Zellauswahl | Kapazitäts- und ESR-Quelle, **Leiterplatte** (Packung, Ausrichtung, Stecker), **Vorgaben** (Bauraum, Masse, Kosten), Tabelle aller Kandidaten, Layout-Vergleich quadratisch/hexagonal |
-| 6 Thermik | Thermik-Modus, Wärmeabfuhr, ESR am Lebensende, Aufschlüsselung ΔT, ΔT je Kandidat |
+| 5 Zellauswahl und Layout | Kapazitäts- und ESR-Quelle, **Leiterplatte** (Packung, Ausrichtung, Stecker), Tabelle aller Kandidaten (P-Treiber, Reserve am Lebensende und neu), „Was passt in den Bauraum?“, Layout-Vergleich quadratisch/hexagonal im gemeinsamen Maßstab |
+| 6 Thermik | Thermik-Modus, Wärmeabfuhr, ESR am Lebensende, Aufschlüsselung ΔT, ΔT je Kandidat, Netzwerkmodell (Wärmebild, Aufheizen, Modellvergleich, Messvergleich, Nachbarschichten), Quellen |
 | 7 Bewertung und Auswahl | Gewichtung (ausgewogen, Kosten, kompakt, robust, eigene), Rangliste, Abbildung wie IECON mit Moduldichte, interaktiver Vergleich, Auswahl übernehmen |
 | 8 Emulation und Auslegung | Profil endlos im HESS, Strom aus der Leistungsbilanz mit ESR-Abfall, Zelltemperatur aus i² ESR und thermischem Tiefpass, P erhöhen bis alles eingehalten ist, Live-Ansicht |
 | Zelldetail, Datenbank, Export | eine Zelle mit eigenen Optionen, Tabellen bearbeiten, Export (YAML, CSV, LaTeX, Abbildungen PDF/SVG/PNG) |
 
 Konfigurationen außerhalb der Vorgaben (oder der thermischen bzw. P-Grenze) bleiben in den Tabellen sichtbar
 (Spalte Status) und sind in allen Abbildungen grau.
+
+Navigation: links das Flussdiagramm der Dissertation (Kasten anklicken springt in den Schritt, Markierung grün =
+gerechnet, gelb = Warnung, rot = fehlt/bestätigen, grau = übersprungen), oben die Schrittleiste. Darunter in rot,
+was noch fehlt. Zu jeder Kennzahl zeigt der Tooltip die Formel mit eingesetzten Werten und die Herkunft, bei Tabellen
+und Abbildungen der Knopf „ƒ Formeln“ (Registry `sc_module_design/formulas.py`, Herkunft: Andy/Diss, Messung,
+Datenblatt, Annahme Claude, Literatur). Warnungen sind rot.
+
+### U_C0min und Wandlerstrom
+
+U_C0min wird standardmäßig über das Entladeverhältnis r_Q = U_C0min / U_C0max vorgegeben (Start 0,5, 75 % nutzbare
+Energie), alternativ wie in der Diss aus P_SC,max / I_C0max oder fest. Aus dem Profil folgt die Empfehlung für den
+Interface-Wandler: Spitzenstrom P_SC,max / U_C0min und Dauerstrom (RMS). I_C0max muss ausdrücklich bestätigt
+werden, sonst bleibt Schritt 2 rot. Optional: minimale Eingangsspannung des Wandlers (Prüfung der Klemmenspannung
+U_C - R I in der Emulation).
+
+### Thermisches Netzwerkmodell (Precheck)
+
+Nach Andys Spezifikation (jede Zelle Wärmequelle mit P = I_RMS² ESR, Abgabe über R_air an die lokale Luft,
+lokale Luft als Mittel aus Nachbarn und Umgebung, Luftspaltleitung R_gap, Strahlung der oberen Kreisfläche
+optional). Auf dem echten Leiterplatten-Layout (Nachbarn aus dem Layout) und als ideale Anordnung mit
+Nachbarschichten (Schichtkonvergenz, Aufheizen). Schalter auf der Startseite. Vergleich mit Einzelzell- und
+Blockmodell und mit eigenen Messwerten auf Seite 6. Optional als Auslegungskriterium (P erhöhen, bis die heißeste
+Zelle unter ΔT_max liegt).
 
 ### Emulationsbasierte Auslegung
 
@@ -143,10 +166,10 @@ S = 23, C_req = 4.165 F / 5.183 F sowie alle P/S-Konfigurationen, Massen, ESR-We
 ## Struktur
 
 ```
-app/                 Streamlit-GUI (app.py, ui.py, widgets.py)
+app/                 Streamlit-GUI (app.py, ui.py, widgets.py, flownav.py, assets/flowchart.png)
 sc_module_design/    Rechenkern (config, database, profile, splits, energy, equations, selection,
-                     thermal, current, converter, layout, tradeoff, emulation, emudesign,
-                     pipeline, plotting, style, report, cli)
+                     thermal, thermal_network, current, converter, layout, formulas, tradeoff,
+                     emulation, emudesign, pipeline, plotting, style, report, cli)
 data/database/       CSV-Datenbank + SOURCES.md (SQLite wird automatisch gebaut)
 data/presets/        YAML-Presets (iecon2023_legacy, thesis_datasheet, thesis_characterized,
                      legged_robot_24V, legged_robot_48V)

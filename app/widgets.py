@@ -13,8 +13,9 @@ def key(name: str) -> str:
 def num(label: str, obj, attr: str, k: str, step: Optional[float] = None, fmt: Optional[str] = None,
         min_value: Optional[float] = None, max_value: Optional[float] = None, help: Optional[str] = None,
         container=st) -> float:
-    v = container.number_input(label, value=float(getattr(obj, attr)), step=step, format=fmt,
-                               min_value=min_value, max_value=max_value, key=key(k), help=help)
+    kw = {} if key(k) in st.session_state else {"value": float(getattr(obj, attr))}
+    v = container.number_input(label, step=step, format=fmt, min_value=min_value, max_value=max_value, key=key(k),
+                               help=help, **kw)
     setattr(obj, attr, float(v))
     return v
 
@@ -31,7 +32,7 @@ def opt_num(label: str, obj, attr: str, k: str, default: float, help: Optional[s
             fmt: Optional[str] = None, container=st) -> Optional[float]:
     """Optional float: checkbox 'set' + number input (None if unchecked)."""
     cur = getattr(obj, attr)
-    c1, c2 = container.columns([1, 2])
+    c1, c2 = container.columns([1.3, 1])
     on = c1.checkbox(label, value=cur is not None, key=key(k + "_on"), help=help)
     if on:
         v = c2.number_input(label, value=float(cur if cur is not None else default), key=key(k),

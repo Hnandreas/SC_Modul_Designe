@@ -29,6 +29,8 @@ req:
   U_bus_V: 48.0
   U_C0max_V: 48.0
   P_max_mode: peak
+  U_C0min_mode: fixed
+  I_C0max_confirmed: true
   I_C0max_A: 77.7
   U_C0min_override_V: 33.0
   T_cell_C: 65.0

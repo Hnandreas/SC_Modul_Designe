@@ -246,3 +246,101 @@ def test_specification_limits_grey_out():
     assert len(bad) and not bad.feasible.any()
     assert bad.status.str.startswith("Vorgabe verletzt").all()
     assert df[df.volume_dm3 <= 0.5].feasible.all()
+
+
+# ---------------------------------------------------------------------- U_C0min via r_Q, converter current
+def test_rq_mode_and_converter_recommendation():
+    inp = load_preset("legged_robot_48V")
+    assert inp.req.U_C0min_mode == "r_Q" and inp.req.r_Q == 0.5
+    r = run_design(inp)
+    v = r.voltages
+    assert v["U_C0min"] == pytest.approx(24.0)
+    assert v["I_C0max_rec"] == pytest.approx(r.load["P_SC_max_W"] / 24.0)
+    assert any("nicht bestätigt" in w for w in r.warnings)
+    inp.req.I_C0max_confirmed = True
+    inp.req.r_Q = 0.6
+    r2 = run_design(inp)
+    assert r2.voltages["U_C0min"] == pytest.approx(28.8)
+    assert not any("nicht bestätigt" in w for w in r2.warnings)
+
+
+def test_old_presets_keep_fixed_u_c0min():
+    d = DesignInputs.from_dict({"req": {"U_C0min_override_V": 33.0}})
+    assert d.req.U_C0min_mode == "fixed"
+    assert load_preset("iecon2023_legacy").req.U_C0min_mode == "fixed"
+
+
+def test_reserve_eol_bol_and_driver():
+    r = run_design(load_preset("legged_robot_48V"))
+    df = r.candidates["profile"]
+    L = r.inputs.req.L_EOL
+    assert np.allclose(df.C_reserve_BOL, (df.C_reserve + 1) / L - 1)
+    row = df.set_index("cell_id").loc["VISHAY_HVR235_50F"]
+    assert "Strom" in row.P_driver                          # large reserve explained by the current
+
+
+# ---------------------------------------------------------------------- thermal network (Andy's specification)
+def test_network_gap_resistance_and_cell_counts():
+    from sc_module_design.thermal_network import n_cells, r_gap, ring_grid
+    assert r_gap(18, 35, 0.0) == pytest.approx(235.8, abs=0.05)
+    assert r_gap(18, 35, 1.0) == pytest.approx(296.9, abs=0.05)
+    for n in range(5):
+        assert ring_grid("square", n).n == n_cells("square", n) == 1 + 2 * n * (n + 1)
+        assert ring_grid("hex", n).n == n_cells("hex", n) == 1 + 3 * n * (n + 1)
+
+
+def test_network_single_cell_and_energy_balance():
+    from sc_module_design.thermal_network import NetworkParams, SIGMA, ring_grid, steady_state, transient
+    p = NetworkParams(radiation=False)
+    g = ring_grid("hex", 0)
+    res = steady_state(g, p, 0.5)
+    # single cell: T_air = (0 + 7 T_inf)/7 = T_inf -> dT = P R_air
+    assert res.T[0] - 25 == pytest.approx(0.5 * 22.1)
+    # module: all heat leaves to the ambient (no storage in steady state)
+    g = ring_grid("hex", 3)
+    res = steady_state(g, p, 0.7)
+    q_out = ((res.T - res.T_air) / p.R_air).sum()
+    assert q_out == pytest.approx(0.7 * g.n, rel=1e-9)
+    assert res.T[g.centre] == pytest.approx(res.T.max())
+    assert res.summary()["dT_centre_outer_K"] > 0
+    # radiation order of magnitude from the specification: about 3.2 mW at 60 degC
+    pr = NetworkParams()
+    assert pr.eps * SIGMA * pr.A_top * ((60 + 273.15) ** 4 - (25 + 273.15) ** 4) == pytest.approx(3.2e-3, abs=0.1e-3)
+    t, T = transient(g, p, 0.7, t_end_s=6 * 3600, n_points=20)
+    assert T[-1, g.centre] == pytest.approx(res.T[g.centre], abs=0.3)
+
+
+def test_network_on_pcb_layout():
+    from sc_module_design.layout import pcb_layout
+    from sc_module_design.thermal_network import NetworkParams, layout_grid, steady_state
+    lay = pcb_layout(23, 3, 18, 35, "hex", 0.5, 5)
+    g = layout_grid(lay)
+    assert g.n == 69 and g.z == 6
+    assert g.m.max() == 6 and g.m.min() >= 1
+    res = steady_state(g, NetworkParams(s_mm=0.5), 0.5)
+    s = res.summary()
+    assert s["dT_max_K"] >= s["dT_centre_K"] > s["dT_outer_mean_K"] > 0
+
+
+def test_max_P_in_space():
+    from sc_module_design.selection import layout_for, max_P_in_space
+    inp = load_preset("thesis_characterized")
+    cell = get_database().cell("VISHAY_HVR235_50F")
+    inp.req.max_width_mm, inp.req.max_depth_mm = 150.0, 220.0
+    Pm = max_P_in_space(cell, 23, inp.opt, inp.req)
+    assert Pm >= 1
+    lay = layout_for(cell, 23, Pm, inp.opt, inp.req)
+    assert lay.width_mm <= 150 and lay.depth_mm <= 220
+    lay2 = layout_for(cell, 23, Pm + 1, inp.opt, inp.req)
+    assert lay2.width_mm > 150 or lay2.depth_mm > 220 or not lay2.fits_limits
+
+
+def test_converter_min_voltage_in_emulation():
+    t = np.arange(0, 20, 0.001)
+    p = 400 + 1500 * (np.sin(2 * np.pi * 0.2 * t) > 0.9)
+    pb = np.full_like(p, p.mean())
+    m = ModuleModel(S=23, P=2, C_cell_F=30, R_cell_Ohm=0.05, U_min=24, U_max=48, U_init=40, I_max_A=80)
+    em = HESSEmulator(t, p, pb, m, EmulationConfig(U_conv_min_V=39.0))
+    s, tr = em.run_cycle()
+    assert s.t_Uconv_min_s > 0
+    assert s.t_Uconv_min_s == pytest.approx(np.sum(tr.U_term < 39.0) * em.dt)

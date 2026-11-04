@@ -2,8 +2,8 @@ name: legged_robot_24V
 description: >-
   Public quadruped power profile (LeggedRobotMPC2025, reconstructed from the published figure, 25 s,
   mean 75.6 W, peak 916 W) with a 24 V bus. Split: centred moving average 3 s (as in the thesis figure),
-  no braking event. Interface converter current limit I_C0max = 2 P_max / U_bus, so U_C0min is about half
-  of U_C0max. Lifetime and thermal requirements as for the robot arm (65 °C, 40000 h, L_EOL 0.7, dT 40 K).
+  no braking event. U_C0min = r_Q U_C0max with r_Q = 0.5; converter current limit I_C0max about
+  P_SC,max / U_C0min (recommendation from the profile, to be confirmed in step 3). Lifetime and thermal requirements as for the robot arm (65 °C, 40000 h, L_EOL 0.7, dT 40 K).
   Cell parameters as in thesis_characterized.
 profile:
   path: data/profiles/public/legged_robot_LeggedRobotMPC2025.csv
@@ -18,6 +18,9 @@ req:
   U_bus_V: 24.0
   U_C0max_V: 24.0
   P_max_mode: peak
+  U_C0min_mode: r_Q
+  r_Q: 0.5
+  I_C0max_confirmed: false
   I_C0max_A: 80.0
   T_cell_C: 65.0
   t_life_h: 40000.0

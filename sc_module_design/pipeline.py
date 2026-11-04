@@ -189,24 +189,44 @@ def run_design(inp: DesignInputs, db: Optional[Database] = None, profile: Option
         return res
 
     # ------------------------------------------------------------ step 2: U_C0min
-    s2 = res.step("2", "Select U_C0min = P_SC,max / I_C0max")
-    U_min_calc = eq.u_c0min_from_current(load["P_SC_max_W"], req.I_C0max_A)
-    U_min = req.U_C0min_override_V or U_min_calc
-    I_at_min = load["P_SC_max_W"] / U_min
-    s2.values = dict(U_C0min=U_min, U_C0min_calc=U_min_calc, I_at_U_C0min=I_at_min, P_SC_max=load["P_SC_max_W"])
+    s2 = res.step("2", "Select U_C0min")
+    P_scmax = load["P_SC_max_W"]
+    U_min_calc = eq.u_c0min_from_current(P_scmax, req.I_C0max_A)
+    mode = req.U_C0min_mode
+    if mode == "fixed" and req.U_C0min_override_V:
+        U_min = float(req.U_C0min_override_V)
+    elif mode == "current":
+        U_min = U_min_calc
+    else:
+        mode = "r_Q"
+        U_min = req.r_Q * U_max
+    I_at_min = P_scmax / U_min
+    # converter current recommendation from the profile
+    p_rms = float(np.sqrt(np.mean(res.p_sc ** 2))) if res.p_sc is not None else float("nan")
+    I_rec = I_at_min
+    s2.values = dict(U_C0min=U_min, U_C0min_calc=U_min_calc, I_at_U_C0min=I_at_min, P_SC_max=P_scmax, mode=mode,
+                     I_C0max_rec=I_rec, P_SC_rms=p_rms)
     s2.status = "done"
-    s2.summary = f"U_C0min = {U_min:.2f} V (calculated {U_min_calc:.2f} V)"
-    if req.U_C0min_override_V and U_min < U_min_calc - 1e-6:
+    s2.summary = {"r_Q": f"U_C0min = r_Q U_C0max = {req.r_Q:.2f} x {U_max:.1f} V = {U_min:.2f} V",
+                  "current": f"U_C0min = P_SC,max / I_C0max = {P_scmax:.0f} W / {req.I_C0max_A:g} A = {U_min:.2f} V",
+                  "fixed": f"U_C0min = {U_min:.2f} V (fest, berechnet {U_min_calc:.2f} V)"}[mode]
+    if req.I_C0max_A < I_rec - 1e-6:
         s2.status = "warning"
-        s2.summary += (f", override below calculated value: I = {I_at_min:.1f} A > I_C0max = "
-                       f"{req.I_C0max_A:g} A at P_SC,max")
-    if br.enabled and load.get("P_brake_W", 0) > load["P_SC_max_W"]:
+        msg = (f"Wandler-Stromgrenze I_C0max = {req.I_C0max_A:g} A ist kleiner als P_SC,max / U_C0min = "
+               f"{P_scmax:.0f} W / {U_min:.1f} V = {I_rec:.1f} A: die Spitzenleistung ist bei U_C0min nicht lieferbar.")
+        s2.summary += " | " + msg
+        res.warnings.append(msg)
+    if not req.I_C0max_confirmed:
+        res.warnings.append(f"Wandler-Stromgrenze I_C0max = {req.I_C0max_A:g} A ist noch nicht bestätigt "
+                            f"(Empfehlung aus dem Profil: {I_rec:.1f} A Spitze bei U_C0min).")
+    if br.enabled and load.get("P_brake_W", 0) > P_scmax:
         res.warnings.append("Braking power exceeds P_SC,max used for U_C0min.")
     if U_min >= U_max:
         s2.status, s2.summary = "error", s2.summary + " (U_C0min >= U_C0max)"
         return res
     res.voltages = dict(U_C0max=U_max, U_C0min=U_min, U_C0min_calc=U_min_calc, r_Q=U_min / U_max,
-                        energy_ratio=float(eq.energy_ratio(U_min / U_max)))
+                        energy_ratio=float(eq.energy_ratio(U_min / U_max)), mode=mode, I_C0max_rec=I_rec,
+                        P_SC_rms=p_rms, I_rms_at_Umin=p_rms / U_min if p_rms == p_rms else float("nan"))
 
     # ------------------------------------------------------------ steps 3/4 per scenario
     s3 = res.step("3", "Select U_C0inM (energy-weighted midpoint)")
@@ -228,6 +248,9 @@ def run_design(inp: DesignInputs, db: Optional[Database] = None, profile: Option
         C_req = eq.c_required(W, U_max, U_min, req.L_EOL)
         res.scenarios[key] = ScenarioContext(key, SCENARIOS[key], load["E_dch_J"], E_ch, W, U_min, U_inM, U_max,
                                              C_req, req.I_C0max_A, psc_b, lab)
+    if res.scenarios and p_rms == p_rms:
+        U_inM0 = next(iter(res.scenarios.values())).U_inM
+        res.voltages["I_rms_at_UinM"] = p_rms / U_inM0
     s3.status = s4.status = "done" if res.scenarios else "error"
     s3.summary = "; ".join(f"{k}: U_C0inM = {s.U_inM:.2f} V" for k, s in res.scenarios.items())
     s4.summary = "; ".join(f"{k}: W_used = {s.W_used_J:.1f} J -> C_req = {s.C_req:.3f} F"

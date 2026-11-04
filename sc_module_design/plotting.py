@@ -414,8 +414,8 @@ def fig_dT_candidates(df, dT_max: float) -> Figure:
 
 
 # ---------------------------------------------------------------------- emulation
-def fig_emulated_profile(trace, module, sc=None, t_window: Optional[tuple] = None, i_limit: Optional[float] = None
-                         ) -> Figure:
+def fig_emulated_profile(trace, module, sc=None, t_window: Optional[tuple] = None, i_limit: Optional[float] = None,
+                         u_conv_min: Optional[float] = None) -> Figure:
     """Emulated supercapacitor profile over one periodic cycle: power, current, voltage, temperature."""
     t = trace.t - trace.t[0]
     m = np.ones_like(t, bool) if t_window is None else (t >= t_window[0]) & (t <= t_window[1])
@@ -439,6 +439,8 @@ def fig_emulated_profile(trace, module, sc=None, t_window: Optional[tuple] = Non
     ax.plot(t[m], trace.U_term[m], color=PINK, lw=0.6, label="Terminal voltage $U_C - R I$")
     ax.axhline(module.U_min, color="k", ls="--", lw=0.8, label="$U_\\mathrm{C0min}$, $U_\\mathrm{C0max}$")
     ax.axhline(module.U_max, color="k", ls="--", lw=0.8)
+    if u_conv_min:
+        ax.axhline(u_conv_min, color=MAGENTA, ls="-.", lw=0.9, label="Converter min. input voltage")
     if sc is not None:
         ax.axhline(sc.U_inM, color=DARK_GREY, ls=":", lw=0.9, label="$U_\\mathrm{C0inM}$")
     ax.set_ylabel("Voltage [V]")
@@ -589,11 +591,15 @@ def _module_text(lay, mass_cells_kg: Optional[float], pcb_g_cm2: float) -> str:
 
 
 def fig_pcb_layout(lay, cell_label: str = "", mass_cells_kg: Optional[float] = None,
-                   pcb_g_cm2: float = 0.35) -> Figure:
-    """Top view of the module PCB: cells, parallel groups, U-shaped series path, connectors at the front."""
-    w_cm = 8.0 if lay.width_mm <= 1.3 * lay.depth_mm else 12.0
-    fig, ax = plt.subplots(figsize=(w_cm * CM, w_cm * CM * lay.depth_mm / lay.width_mm + 2.6 * CM))
+                   pcb_g_cm2: float = 0.35, extent: Optional[tuple] = None) -> Figure:
+    """Top view of the module PCB: cells, parallel groups, U-shaped series path, connectors at the front.
+    extent = (width, depth) in mm: common scale for all modules (largest module fills the frame)."""
+    W, D = (max(extent[0], lay.width_mm), max(extent[1], lay.depth_mm)) if extent else (lay.width_mm, lay.depth_mm)
+    w_cm = 8.0 if W <= 1.3 * D else 12.0
+    fig, ax = plt.subplots(figsize=(w_cm * CM, w_cm * CM * D / W + 2.6 * CM))
     _draw_layout(ax, lay)
+    ax.set_xlim(-2, W + 2)
+    ax.set_ylim(-2, D + 2)
     ax.set_ylabel("Depth [mm]")
     ax.text(0.5, 1.02, (cell_label + ": " if cell_label else "") + _module_text(lay, mass_cells_kg, pcb_g_cm2),
             transform=ax.transAxes, ha="center", va="bottom")
@@ -602,10 +608,12 @@ def fig_pcb_layout(lay, cell_label: str = "", mass_cells_kg: Optional[float] = N
     return fig
 
 
-def fig_layout_compare(sq, hx, mass_cells_kg: Optional[float] = None, pcb_g_cm2: float = 0.35) -> Figure:
-    """Square versus hexagonal (offset) packing of the same module: module (PCB) area, volume and density."""
-    W = max(sq.width_mm, hx.width_mm)
-    D = max(sq.depth_mm, hx.depth_mm)
+def fig_layout_compare(sq, hx, mass_cells_kg: Optional[float] = None, pcb_g_cm2: float = 0.35,
+                       extent: Optional[tuple] = None) -> Figure:
+    """Square versus hexagonal (offset) packing of the same module: module (PCB) area, volume and density.
+    extent = (width, depth) in mm: common scale for all modules (largest module fills the frame)."""
+    W = max(sq.width_mm, hx.width_mm, extent[0] if extent else 0)
+    D = max(sq.depth_mm, hx.depth_mm, extent[1] if extent else 0)
     wide = W > 1.3 * D
     if wide:
         aw = W2 - 1.6 * CM
@@ -631,4 +639,74 @@ def fig_layout_compare(sq, hx, mass_cells_kg: Optional[float] = None, pcb_g_cm2:
         axes[1].set_ylabel("Depth [mm]")
     _layout_handles(axes[0], sq)
     legend_below(fig, ncol=2)
+    return fig
+
+
+# ---------------------------------------------------------------------- thermal network (precheck)
+def fig_network_heatmap(net, extent: Optional[tuple] = None, title: str = "") -> Figure:
+    """Steady temperature rise of every cell (thermal network, Andy's specification), top view."""
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.patches import Circle
+    g, p = net.grid, net.params
+    dT = net.T - p.T_inf_C
+    xy = g.xy
+    r = p.d_mm / 2
+    x0, y0 = xy[:, 0].min() - r - 3, xy[:, 1].min() - r - 3
+    W = xy[:, 0].max() + r + 3 - x0
+    D = xy[:, 1].max() + r + 3 - y0
+    if extent:
+        W, D = max(W, extent[0]), max(D, extent[1])
+    w_cm = 8.0 if W <= 1.3 * D else 12.0
+    fig, ax = plt.subplots(figsize=(w_cm * CM + 1.6 * CM, w_cm * CM * D / W + 1.8 * CM))
+    norm = Normalize(0, max(float(dT.max()), 1e-3))
+    cmap = plt.get_cmap("plasma")
+    for (x, y), v in zip(xy, dT):
+        ax.add_patch(Circle((x, y), r, facecolor=cmap(norm(v)), edgecolor="#1a1a1a", lw=0.4))
+    ax.plot(*xy[g.centre], "x", color="white", ms=5, mew=1.2)
+    ax.set_xlim(x0, x0 + W)
+    ax.set_ylim(y0, y0 + D)
+    ax.set_aspect("equal")
+    ax.set_xlabel("Width [mm]")
+    ax.set_ylabel("Depth [mm]")
+    ax.grid(False)
+    cb = fig.colorbar(ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.05, pad=0.02)
+    cb.set_label("Temperature rise $\\Delta T$ [K]")
+    cb.outline.set_edgecolor(GREY)
+    s = net.summary()
+    ax.text(0.5, 1.02, title or (f"Centre {s['dT_centre_K']:.1f} K, outer mean {s['dT_outer_mean_K']:.1f} K, "
+                                 f"max {s['dT_max_K']:.1f} K"), transform=ax.transAxes, ha="center", va="bottom")
+    return fig
+
+
+def fig_network_transient(t, T, grid, T_inf: float, dT_max: Optional[float] = None) -> Figure:
+    """Heating of the module: centre cell, hottest cell and mean of the outer cells."""
+    fig, ax = plt.subplots(figsize=(W2, 5.0 * CM))
+    tm = t / 60
+    dT = T - T_inf
+    hot = int(np.argmax(dT[-1]))
+    ax.plot(tm, dT[:, grid.centre], color=MAGENTA, label="Centre cell")
+    if hot != grid.centre:
+        ax.plot(tm, dT[:, hot], color=UIBK_ORANGE, ls="--", label="Hottest cell")
+    ax.plot(tm, dT[:, grid.outer].mean(1), color=UIBK_BLUE, label="Outer cells (mean)")
+    if dT_max:
+        ax.axhline(dT_max, color="k", ls="--", lw=0.9, label=f"Limit {dT_max:g} K")
+    ax.set_xlabel("Time [min]")
+    ax.set_ylabel("$\\Delta T$ [K]")
+    ax.set_xlim(0, tm[-1])
+    ax.set_ylim(0, None)
+    panel_legend(ax, ncol=4)
+    return fig
+
+
+def fig_network_layers(rows: list, dT_max: Optional[float] = None) -> Figure:
+    """Steady temperatures over the number of neighbour layers (layer convergence)."""
+    fig, ax = plt.subplots(figsize=(W1, 5.2 * CM))
+    n = [r["layers"] for r in rows]
+    ax.plot(n, [r["dT_centre_K"] for r in rows], "o-", color=MAGENTA, ms=3, label="Centre cell")
+    ax.plot(n, [r["dT_outer_mean_K"] for r in rows], "s-", color=UIBK_BLUE, ms=3, label="Outer layer (mean)")
+    if dT_max:
+        ax.axhline(dT_max, color="k", ls="--", lw=0.9, label=f"Limit {dT_max:g} K")
+    ax.set_xlabel("Neighbour layers [-]")
+    ax.set_ylabel("$\\Delta T$ [K]")
+    panel_legend(ax, ncol=2)
     return fig

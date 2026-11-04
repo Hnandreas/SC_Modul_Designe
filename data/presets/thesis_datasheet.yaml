@@ -1,7 +1,7 @@
 name: thesis_datasheet
 description: >-
   Dissertation, Sec. Supercapacitor Module Design, datasheet-based design: same procedure and inputs as
-  IECON 2023 (values of the thesis text), but physically correct module volume/density, braking power
+  IECON 2023 (values of the thesis text), but module volume/density from the PCB layout (hexagonal), braking power
   1980 W (t_brake = 1.0 s) and thermal verification for every cell with own R_th/C_th (flowchart default).
 profile:
   path: data/profiles/private/robot_arm_profile.npz
@@ -20,6 +20,8 @@ req:
   U_bus_V: 48.0
   U_C0max_V: 48.0
   P_max_mode: peak
+  U_C0min_mode: fixed
+  I_C0max_confirmed: true
   I_C0max_A: 77.7
   U_C0min_override_V: 33.0
   T_cell_C: 65.0
@@ -32,7 +34,11 @@ opt:
   scenarios: [profile, profile_braking]
   c_source: datasheet
   esr_source: datasheet_dc
-  geometry: corrected
+  geometry: pcb
+  packing: hex
+  pcb_orientation: auto
+  pcb_bands: 0
+  cell_spacing_mm: 0.5
   thermal_mode: available_only
   thermal_current: energy_balance
   thermal_profile: periodic

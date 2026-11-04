@@ -57,7 +57,11 @@ class Requirements:
     P_max_mode: str = "peak"             # peak | peak_minus_avg | manual
     P_max_W: Optional[float] = None      # used when P_max_mode == manual
     I_C0max_A: float = 77.7              # module / interface converter current limit
-    U_C0min_override_V: Optional[float] = None
+    I_C0max_confirmed: bool = False      # converter current explicitly confirmed by the user
+    U_C0min_mode: str = "r_Q"            # r_Q (U_C0min = r_Q U_C0max) | current (P_SC,max / I_C0max) | fixed
+    r_Q: float = 0.5                     # discharge ratio U_C0min / U_C0max for mode r_Q
+    U_C0min_override_V: Optional[float] = None   # value for mode fixed
+    U_conv_min_V: Optional[float] = None # optional minimum input voltage of the converter (terminal voltage)
     T_cell_C: float = 65.0               # temperature for the lifetime derating
     t_life_h: float = 40000.0
     L_EOL: float = 0.7
@@ -120,6 +124,12 @@ class Options:
         "cost": 1.0, "mass": 1.0, "volume": 1.0, "losses": 1.0, "thermal": 1.0, "cells": 1.0,
         "reserve": 1.0, "data": 1.0})
     reserve_cap: float = 0.3                       # capacity reserve above this gives no extra benefit
+    # thermal network model (Andy's specification, precheck); switch on the start page
+    thermal_network: bool = True
+    net_radiation: bool = True
+    net_eps: float = 0.05
+    net_lambda: float = 0.026
+    net_use_for_design: bool = False               # increase P until the hottest cell of the network <= dT_max
 
 
 @dataclass
@@ -144,7 +154,11 @@ class DesignInputs:
 
     @classmethod
     def from_dict(cls, d: dict) -> "DesignInputs":
-        return _from_dict(cls, d or {})
+        d = copy.deepcopy(d or {})
+        r = d.get("req") or {}
+        if "U_C0min_mode" not in r and r.get("U_C0min_override_V"):
+            r["U_C0min_mode"] = "fixed"          # older presets: fixed U_C0min
+        return _from_dict(cls, d)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "DesignInputs":

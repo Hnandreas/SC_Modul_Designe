@@ -107,6 +107,9 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
     S = int(row["S"])
     if cfg is None:
         cfg = EmulationConfig(eta_dch=req.eta_dch, eta_ch=req.eta_ch)
+    if cfg.U_conv_min_V is None:
+        cfg.U_conv_min_V = req.U_conv_min_V
+    cfg.U_bus_V = req.U_bus_V
     cfg.eol = check_eol
     cfg.L_EOL = req.L_EOL
     prof = res.profile
@@ -158,6 +161,8 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             reasons.append(f"P < P_I,emu = {P_I_emu}")
         if last.t_power_limit_s > 0:
             reasons.append(f"Leistungsgrenze U_C^2/(4R) {last.t_power_limit_s:.2f} s erreicht")
+        if last.t_Uconv_min_s > 0:
+            reasons.append(f"Klemmenspannung < U_Wandler,min = {cfg.U_conv_min_V:g} V für {last.t_Uconv_min_s:.2f} s")
         if dTm == dTm and dTm > req.dT_max_K:
             reasons.append(f"dT = {dTm:.1f} K > {req.dT_max_K:g} K")
         ok = not reasons

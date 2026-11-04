@@ -15,6 +15,7 @@ from .profile import Binned
 from .layout import pcb_layout
 from .thermal import (block_coupling_factor, block_layout, cell_surface_mm2, module_current, scale_thermal,
                       temperature_rise)
+from .thermal_network import NetworkParams, layout_grid, steady_state
 
 C_SOURCES = {
     "datasheet": "Datenblatt-Kapazität C_cell (IECON 2023)",
@@ -33,7 +34,7 @@ THERMAL_MODES = {
     "proxy": "Eigene Werte, sonst unverändert von gleicher/nächst größerer Zelle übernommen (Warnung)",
 }
 GEOMETRY_MODES = {
-    "pcb": "Leiterplatten-Layout (hexagonal oder quadratisch), Volumen = Platine x Bauhöhe",
+    "pcb": "Modulvolumen aus dem Leiterplatten-Layout (Standard hexagonal), Volumen = Platine x Bauhöhe",
     "corrected": "Reines Zellvolumen S P pi (D/2)^2 L / Packungsfaktor",
     "legacy_iecon": "IECON-2023-Skript: V = P pi D^2 L (Durchmesser als Radius, Faktor S fehlt)",
 }
@@ -67,6 +68,7 @@ class CandidateDetail:
     esr_row: Optional[dict] = None
     thermal: Optional[dict] = None
     breakdown: list = field(default_factory=list)
+    network: object = None          # thermal_network.NetworkResult (precheck)
 
 
 # ---------------------------------------------------------------------- resolvers
@@ -250,6 +252,62 @@ def thermal_breakdown(cell: dict, traj, S: int, P: int, R_cell_bol: float, th: d
 
 
 # ---------------------------------------------------------------------- candidate
+def network_params(cell: dict, th: dict, opt: Options, req: Requirements) -> NetworkParams:
+    return NetworkParams(d_mm=float(cell["diameter_mm"]), L_mm=float(cell["length_mm"]), R_air=float(th["rth"]),
+                         C_th=float(th["cth"]), T_inf_C=req.T_amb_C, lam=opt.net_lambda, s_mm=opt.cell_spacing_mm,
+                         radiation=opt.net_radiation, eps=opt.net_eps)
+
+
+def network_check(cell: dict, S: int, P: int, th: dict, I_cell_rms: float, R_loss: float, opt: Options,
+                  req: Requirements):
+    """Andy's thermal network (precheck) on the real PCB layout. P_cell = I_cell,RMS^2 ESR (mean loss)."""
+    if th is None or opt.geometry != "pcb" or not (I_cell_rms == I_cell_rms):
+        return None
+    lay = layout_for(cell, S, P, opt, req)
+    if lay is None:
+        return None
+    return steady_state(layout_grid(lay), network_params(cell, th, opt, req), I_cell_rms ** 2 * R_loss)
+
+
+def max_P_in_space(cell: dict, S: int, opt: Options, req: Requirements, P_limit: Optional[int] = None) -> int:
+    """Largest number of parallel strings whose module still fits into the given space (Vorgaben).
+    Returns 0 if not even P = 1 fits; P_limit if there is no geometric limit."""
+    P_limit = P_limit or opt.P_limit
+    if all(getattr(req, k, None) is None for k in ("max_width_mm", "max_depth_mm", "max_height_mm",
+                                                   "max_volume_dm3", "max_mass_kg", "max_cost_EUR")):
+        return P_limit
+    best = 0
+    for P in range(1, P_limit + 1):
+        lay = layout_for(cell, S, P, opt, req)
+        if lay is None:
+            return P_limit
+        mass, vol, _ = module_geometry(cell, S, P, opt, req)
+        price = cell.get("price_EUR")
+        row = dict(volume_dm3=vol, mass_kg=mass, cost_EUR=S * P * price if not _isnan(price) else np.nan)
+        if spec_violations(row, lay, req) or not lay.fits_limits:
+            break
+        best = P
+    return best
+
+
+def p_driver(P: int, P_C: int, P_I: int, P_T, P_min: int, P_thermal_loop: bool, P_net: bool) -> str:
+    out = []
+    if P_net:
+        out.append("Thermik Netzwerk")
+    if P_thermal_loop:
+        out.append("Thermik transient")
+    if not out:
+        if P_T == P_T and P_T is not None and int(P_T) == P:
+            out.append("Thermik RMS")
+        if P_I == P:
+            out.append("Strom")
+        if P_C == P:
+            out.append("Kapazität")
+        if P_min == P and not out:
+            out.append("P mindestens")
+    return " + ".join(out) or "Kapazität"
+
+
 def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life: float, req: Requirements,
                        opt: Options, db: Database, thermal_mode: Optional[str] = None,
                        thermal_override: Optional[dict] = None, P_min: int = 1) -> tuple[dict, CandidateDetail]:
@@ -292,6 +350,9 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
     feasible = True
     status = "zulässig"
     traj = None
+    P_loop = False
+    P_net = False
+    P_after_PT = None
     R_th_loss = R_cell * opt.thermal_esr_factor
     if th is None:
         det.log.append("Schritt 7: R_th, C_th nicht vorhanden -> Schritte 8 bis 10 übersprungen")
@@ -321,6 +382,7 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
         if P_T > P:
             P = P_T
             traj = trajectory(P)
+        P_after_PT = P
         thermal_status = "ok"
         while True:
             k_th = coupling_factor(cell, S * P, opt, S, req)
@@ -337,6 +399,7 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
                 break
             P += 1
             thermal_status = "P erhöht"
+            P_loop = True
             traj = trajectory(P)
         det.current, det.dT, det.dT0 = traj, dT, dT0
         det.breakdown = thermal_breakdown(cell, traj, S, P, R_cell, th, opt, sc.psc.dt, req)
@@ -347,6 +410,32 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
         if req.T_amb_C + dTmax > req.T_cell_C + 1e-9:
             det.warnings.append(f"T_amb + dT_max = {req.T_amb_C + dTmax:.1f} °C liegt über der Zelltemperatur "
                                 f"{req.T_cell_C:g} °C der Lebensdauerauslegung.")
+
+    net = None
+    if opt.thermal_network and th is not None and traj is not None and opt.geometry == "pcb":
+        net = network_check(cell, S, P, th, traj.I_rms / P, R_th_loss, opt, req)
+        if net is not None and opt.net_use_for_design:
+            while net.summary()["dT_max_K"] > req.dT_max_K and P < opt.P_limit:
+                P += 1
+                P_net = True
+                traj = trajectory(P)
+                net = network_check(cell, S, P, th, traj.I_rms / P, R_th_loss, opt, req)
+            if P_net:
+                dT, dT0 = cell_temperature(traj, R_th_loss, P, rth * coupling_factor(cell, S * P, opt, S, req), cth,
+                                           sc.psc.dt, opt.thermal_profile)
+                dTmax = float(np.max(dT))
+                det.current, det.dT, det.dT0 = traj, dT, dT0
+                det.log.append(f"Netzwerk-Precheck: P auf {P} erhöht, heißeste Zelle "
+                               f"{net.summary()['dT_max_K']:.1f} K <= {req.dT_max_K:g} K")
+        if net is not None:
+            ns = net.summary()
+            det.log.append(f"Netzwerk-Precheck (Layout, {ns['N']} Zellen, P_Zelle = {ns['P_cell_W'] * 1000:.0f} mW): "
+                           f"Zentrum {ns['dT_centre_K']:.1f} K, heißeste {ns['dT_max_K']:.1f} K, außen "
+                           f"{ns['dT_outer_mean_K']:.1f} K")
+            if ns["dT_max_K"] > req.dT_max_K + 1e-9:
+                det.warnings.append(f"Netzwerk-Precheck: heißeste Zelle {ns['dT_max_K']:.1f} K über "
+                                    f"ΔT_max = {req.dT_max_K:g} K (Netzwerkmodell, nicht validiert).")
+    det.network = net
 
     C_mod = eq.module_capacitance(P, S, C_cell)
     R_mod = eq.module_esr(P, S, R_cell)
@@ -371,6 +460,8 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
         u_cell_max_life_V=u_cell_max_life, C_cell_used_F=C_cell, C_source=c_note,
         ESR_cell_mOhm=R_cell * 1000, ESR_source=r_note,
         C_module_F=C_mod, C_reserve=C_mod / sc.C_req - 1 if sc.C_req else np.nan,
+        C_reserve_BOL=C_mod / (sc.C_req * req.L_EOL) - 1 if sc.C_req else np.nan,
+        P_driver=p_driver(P, P_C, P_I, P_T, int(P_min), P_loop, P_net),
         ESR_module_mOhm=R_mod * 1000, I_module_max_A=P * float(cell["i_max_A"]),
         mass_kg=mass, volume_dm3=vol, density_kg_dm3=dens, cost_EUR=cost,
         E_usable_EOL_J=E_use_eol, energy_margin=E_use_eol / sc.W_used_J - 1 if sc.W_used_J else np.nan,
@@ -386,6 +477,9 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
         c_measured=fit is not None and opt.c_source != "datasheet",
         esr_measured=r_row is not None, thermal_measured=bool(th) and not th.get("proxy_of"),
         pcb_mm=(f"{lay.width_mm:.0f} x {lay.depth_mm:.0f}" if lay else ""),
+        dT_net_max_K=net.summary()["dT_max_K"] if net is not None else np.nan,
+        dT_net_centre_K=net.summary()["dT_centre_K"] if net is not None else np.nan,
+        dT_net_outer_K=net.summary()["dT_outer_mean_K"] if net is not None else np.nan,
         layout=(f"{lay.packing}, Gruppe {lay.gx}x{lay.gy}, {lay.bands} Spalten" if lay else ""),
         E_density_Wh_dm3=(E_use_eol / req.L_EOL / 3600 / vol) if vol and not _isnan(vol) else np.nan,
         feasible=feasible, status=status, warnings=" | ".join(det.warnings),

@@ -23,6 +23,7 @@ import streamlit as st  # noqa: E402
 import yaml  # noqa: E402
 from plotly.subplots import make_subplots  # noqa: E402
 
+import flownav  # noqa: E402
 import ui  # noqa: E402
 import widgets as W  # noqa: E402
 from sc_module_design import equations as eq  # noqa: E402
@@ -38,7 +39,9 @@ from sc_module_design.profile import decimate_for_plot, list_profiles  # noqa: E
 from sc_module_design.report import compare_with_reference, export_run, latex_results_table, summary_dict  # noqa: E402
 from sc_module_design.layout import GROUP_SHAPES, ORIENTATIONS, PACKINGS  # noqa: E402
 from sc_module_design.selection import (C_SOURCES, ESR_SOURCES, GEOMETRY_MODES, THERMAL_MODES,  # noqa: E402
-                                        coupling_factor, evaluate_candidate, layout_for, layout_pair)
+                                        coupling_factor, evaluate_candidate, layout_for, layout_pair,
+                                        max_P_in_space, network_params)
+from sc_module_design import thermal_network as TN  # noqa: E402
 from sc_module_design.splits import REGISTRY, apply_split, get_split, load_plugins  # noqa: E402
 from sc_module_design.thermal import COUPLING_MODES, CURRENT_MODES, PROFILE_MODES, block_layout  # noqa: E402
 from sc_module_design.tradeoff import CRITERIA, WEIGHT_PRESETS, preset_weights, score  # noqa: E402
@@ -59,18 +62,23 @@ inp: DesignInputs = st.session_state.inp
 
 PAGES = [
     ("start", "Start und Überblick", []),
-    ("profil", "1  Lastprofil", ["0"]),
+    ("profil", "1  Lastprofil und Bauraum", ["0"]),
     ("split", "2  Leistungsaufteilung", ["0"]),
-    ("spannung", "3  Spannungen und Lebensdauer", ["1", "2", "3"]),
+    ("spannung", "3  Spannungen und Wandlerstrom", ["1", "2", "3"]),
     ("kapazitaet", "4  Kapazität", ["4"]),
-    ("zellen", "5  Zellauswahl", ["5-11"]),
-    ("thermik", "6  Thermik", ["5-11"]),
+    ("zellen", "5  Zellauswahl und Layout", ["5-11"]),
+    ("thermik", "6  Thermik", ["th"]),
     ("tradeoff", "7  Bewertung und Auswahl", ["12"]),
+    ("balancing", "Balancing", ["13"]),
     ("emulation", "8  Emulation und Auslegung", ["14"]),
     ("detail", "Zelldetail", []),
-    ("db", "Datenbank", []),
+    ("db", "Datenbank", ["db"]),
     ("export", "Export", []),
 ]
+SHORT = {"start": "Start", "profil": "1 Profil", "split": "2 Aufteilung", "spannung": "3 Spannung",
+         "kapazitaet": "4 Kapazität", "zellen": "5 Zellen", "thermik": "6 Thermik", "tradeoff": "7 Bewertung",
+         "balancing": "Balancing", "emulation": "8 Emulation", "detail": "Detail", "db": "Datenbank",
+         "export": "Export"}
 PAGE_KEYS = [p[0] for p in PAGES]
 
 
@@ -114,12 +122,30 @@ def compute():
     design_inp.selected = {}          # selection does not change the computation
     r = cached_design(yaml.safe_dump(design_inp.to_dict(), sort_keys=True), db_stamp(), pkey)
     r.inputs = inp                    # current selection for figures and tables
-    st.session_state["last_status"] = {k: s.status for k, s in r.steps.items()}
+    st.session_state["last_status"] = flow_status(r)
     return r
+
+
+def flow_status(r) -> dict:
+    """Status per flowchart box (see flownav.BOXES)."""
+    out = {k: s.status for k, s in r.steps.items()}
+    if not inp.req.I_C0max_confirmed and "2" in out:
+        out["2"] = "error"                     # converter current must be confirmed
+    th = [df for df in r.candidates.values()]
+    if th:
+        done = any((~df.thermal_status.str.startswith("übersprungen")).any() for df in th)
+        net_hot = any((df.get("dT_net_max_K", pd.Series(dtype=float)) > inp.req.dT_max_K).any() for df in th)
+        out["th"] = "warning" if (done and net_hot) else ("done" if done else "skipped")
+    out["db"] = "warning" if r.skipped_cells else "done"
+    out["fin"] = "done" if inp.selected else "open"
+    out.setdefault("13", "skipped")
+    return out
 
 
 def page_status(steps: list) -> str:
     stt = st.session_state.get("last_status", {})
+    if not steps:
+        return ""
     vals = [stt.get(s) for s in steps if stt.get(s)]
     if not vals:
         return ""
@@ -174,12 +200,11 @@ with st.sidebar:
             if k.startswith(("emu_", "live_", "detail_")):
                 st.session_state.pop(k, None)
         st.rerun()
-    st.markdown("**Ablauf**")
     if "nav" not in st.session_state:
         st.session_state["nav"] = "start"
-    page = st.radio("Ablauf", PAGE_KEYS, key="nav", label_visibility="collapsed",
-                    format_func=lambda k: dict((p[0], p[1]) for p in PAGES)[k])
-    status_slot = st.empty()
+    st.markdown("**Flussdiagramm** (Kasten anklicken)")
+    flow_slot = st.empty()
+    missing_slot = st.empty()
     with st.expander("Design speichern"):
         inp.name = st.text_input("Name", inp.name, key=W.key("name"))
         if st.button("Als Preset speichern", width="stretch"):
@@ -195,12 +220,24 @@ with st.sidebar:
 # ============================================================================ pages
 def page_start():
     ui.step_header("ÜBERBLICK", "Supercap-Modul für das hybride Speichersystem",
-                   "Die Seiten links führen Schritt für Schritt durch das Flussdiagramm. Jede Eingabe rechnet "
-                   "sofort neu, fehlende Daten werden übersprungen und markiert.")
+                   "Kasten im Flussdiagramm anklicken (hier oder links) oder die Schritte oben verwenden. Jede "
+                   "Eingabe rechnet sofort neu, fehlende Daten werden übersprungen und rot markiert.")
+    with st.container(border=True):
+        c = st.columns([1.2, 2])
+        W.check("Thermisches Netzwerkmodell (Precheck) aktiv", inp.opt, "thermal_network", "net_on", container=c[0],
+                help="Andys Netzwerkmodell: jede Zelle eigene Wärmequelle, Nachbarkopplung, Gradient innen nach "
+                     "außen. Aus = nur Einzelzell- und Blockmodell (Lumped).")
+        c[1].caption("Netzwerkmodell nach Andys Spezifikation (Precheck, nicht validiert). Einzelzellmodell: Diss "
+                     "Anhang A01 mit eigener Messung. Blockmodell (Lumped): Incropera et al., Fundamentals of Heat "
+                     "and Mass Transfer, Kap. 5.")
     res = compute()
     c1, c2 = st.columns([1.05, 1])
     with c1:
-        st.graphviz_chart(flowchart_dot(res))
+        clicked = flownav.flowchart(st.session_state.get("last_status", {}), "start", key="flownav_start", width=520)
+        st.markdown(flownav.legend_html(), unsafe_allow_html=True)
+        if clicked and clicked != "start":
+            st.session_state["nav"] = clicked
+            st.rerun()
     with c2:
         st.markdown(f"**Preset:** `{inp.name}`")
         if inp.description:
@@ -208,8 +245,6 @@ def page_start():
         for k, s in res.steps.items():
             st.markdown(f"{ui.pill(s.status)} **{k} {s.title}**<br><span class='small'>{s.summary}</span>",
                         unsafe_allow_html=True)
-        if res.warnings:
-            st.warning("\n".join(f"- {w}" for w in res.warnings))
     if res.scenarios:
         st.markdown("#### Gewähltes Modul")
         cols = st.columns(len(res.scenarios))
@@ -224,7 +259,7 @@ def page_start():
                     m = st.columns(4)
                     m[0].metric("Zelle", ui.short(cid))
                     m[1].metric("P/S", f"{pf}/{r.S}" if pf else r.setup,
-                                "aus Emulation" if pf else "analytisch", delta_color="off")
+                                "aus Emulation" if pf else "analytisch", delta_color="off", delta_arrow="off")
                     m[2].metric("C_req", f"{sc.C_req:.2f} F")
                     dts = (inp.selected[sk] or {}).get("dT_max_K", r.dT_max_K) if pf else r.dT_max_K
                     m[3].metric("ΔT max", ui.fmt(dts, 1, "K"))
@@ -233,45 +268,19 @@ def page_start():
     st.button("Los geht's: 1 Lastprofil →", on_click=go_to, args=("profil",), type="primary")
 
 
-def flowchart_dot(res) -> str:
-    st_ = {k: v.status for k, v in res.steps.items()}
-    th_any = any((~df.thermal_status.str.startswith("übersprungen")).any() for df in res.candidates.values())
-    th = "done" if th_any else "skipped"
-    s5 = st_.get("5-11", "open")
-    col = {"done": "#c8e6c9", "warning": "#fff59d", "skipped": "#eeeeee", "error": "#ef9a9a", "open": "#ffffff"}
-
-    def node(nid, label, status, shape="box", dashed=False):
-        style = "rounded,filled" + (",dashed" if dashed or status == "skipped" else "")
-        if shape == "diamond":
-            style = "filled" + (",dashed" if status == "skipped" else "")
-        return f'{nid} [label="{label}", shape={shape}, style="{style}", fillcolor="{col.get(status, "#fff")}", fontsize=10];'
-
-    return "\n".join([
-        "digraph G {", "rankdir=TB; node [fontname=Helvetica]; edge [fontsize=9];",
-        node("req", "Application Requirements", st_.get("0", "open")),
-        node("dbn", "Cell Database", "done", dashed=True),
-        'subgraph cluster_a {label="Module Specification"; color="#003361";',
-        node("s1", "1 U_C0max, U_rated\\nlifetime derating, S", st_.get("1", "open")),
-        node("s2", "2 U_C0min", st_.get("2", "open")), node("s3", "3 U_C0inM", st_.get("3", "open")),
-        node("s4", "4 C_req", st_.get("4", "open")), "}",
-        'subgraph cluster_b {label="Candidate-Cell Selection"; color="#f39200";',
-        node("s5", "5 Select candidate cell", s5), node("s6", "6 p = max(P_C, P_I)", s5),
-        node("s7", "7 R_th, C_th\\navailable?", th, "diamond"), node("s8", "8 P_T", th),
-        node("s9", "9 Transient thermal\\nverification", th), node("s10", "10 Feasible?", th, "diamond"),
-        node("s11", "11 More candidates?", s5, "diamond"), "}",
-        node("s12", "12 Trade-off analysis", st_.get("12", "open")),
-        node("s13", "13 Balancing concept", st_.get("13", "open"), dashed=True),
-        node("s14", "Thermal simulation\\n(emulation)", st_.get("14", "open"), dashed=True),
-        node("fin", "Final module design", "done" if inp.selected else "open"),
-        "req -> s1; s1 -> s2; s2 -> s3; s3 -> s4; s4 -> s5; dbn -> s1 [style=dashed]; dbn -> s5 [style=dashed];",
-        "s5 -> s6; s6 -> s7; s7 -> s8 [label=yes]; s7 -> s11 [label=no]; s8 -> s9; s9 -> s10;",
-        's10 -> s11 [label=yes]; s10 -> s8 [label="no (p+1)"]; s11 -> s5 [label=yes]; s11 -> s12 [label=no];',
-        "s12 -> s13; s13 -> s14; s14 -> fin;", "}"])
+def page_balancing():
+    ui.step_header("SCHRITT 13", "Balancing-Konzept",
+                   "Im Flussdiagramm vorgesehen, im Tool bisher nur als Schnittstelle umgesetzt.")
+    st.info("Eigene Balancing-Modelle lassen sich mit @register_balancing in sc_module_design/balancing.py "
+            "registrieren. Ein Modell ist noch nicht hinterlegt, deshalb ist der Schritt grau.")
+    nav_buttons("balancing")
 
 
 def page_profil():
     ui.step_header("SCHRITT 1", "Lastprofil und Anforderungen",
-                   "Gemessenes Leistungsprofil der Anwendung. Positiv = Last, negativ = Rekuperation.")
+                   "Gemessenes Leistungsprofil der Anwendung (positiv = Last, negativ = Rekuperation) und der "
+                   "verfügbare Bauraum. Ist nur der Bauraum bekannt, zeigt Seite 5, was hineinpasst.")
+    spec_options(inp.req, expanded=True)
     with st.container(border=True):
         c = st.columns([2.2, 1, 1])
         profs = [str(p.relative_to(PROJECT_ROOT)) for p in list_profiles()]
@@ -285,7 +294,7 @@ def page_profil():
         W.num("P = U I x Faktor", inp.profile, "phase_factor", "pphase", container=c[2],
               help="Nur wenn die Datei Spannung und Strom statt Leistung enthält (3 für 3-phasig).")
         if inp.profile.path and not resolve(inp.profile.path).exists():
-            st.warning("Datei nicht gefunden. Es werden die manuellen Werte verwendet.")
+            ui.warn("Datei nicht gefunden. Es werden die manuellen Werte verwendet.")
         with st.expander("Profil hochladen, Zeitfenster, manuelle Werte"):
             up = st.file_uploader("CSV mit Zeit [s] und Leistung [W] (oder Spannung und Strom)", type=["csv", "txt"])
             if up is not None:
@@ -310,12 +319,13 @@ def page_profil():
         return
     s = res.stats
     c = st.columns(6)
-    c[0].metric("P_avg", f"{s['P_avg_W']:.1f} W")
-    c[1].metric("P_peak", f"{s['P_peak_W']:.0f} W")
-    c[2].metric("P_RMS", f"{s['P_rms_W']:.0f} W")
-    c[3].metric("Peak / Mittelwert", f"{s['peak_to_avg']:.1f}")
-    c[4].metric("Dauer", f"{s['duration_s']:.1f} s", f"Abtastung {s['dt_s'] * 1e3:.3g} ms", delta_color="off")
-    c[5].metric("Grenze Leistungsspitzen", f"{res.peaks['upper_fence']:.0f} W", "Q3 + 1.5 IQR", delta_color="off")
+    ui.metric(c[0], "P_avg", f"{s['P_avg_W']:.1f} W", key="P_avg")
+    ui.metric(c[1], "P_peak", f"{s['P_peak_W']:.0f} W", key="P_sc_max")
+    ui.metric(c[2], "P_RMS", f"{s['P_rms_W']:.0f} W", key="P_rms")
+    ui.metric(c[3], "Peak / Mittelwert", f"{s['peak_to_avg']:.1f}", key="P_avg",
+              calc=f"{s['P_peak_W']:.0f} W / {s['P_avg_W']:.1f} W")
+    c[4].metric("Dauer", f"{s['duration_s']:.1f} s", f"Abtastung {s['dt_s'] * 1e3:.3g} ms", delta_color="off", delta_arrow="off")
+    ui.metric(c[5], "Grenze Leistungsspitzen", f"{res.peaks['upper_fence']:.0f} W", "Q3 + 1.5 IQR", key="fence")
     td, pd_ = decimate_for_plot(prof.t, prof.p, 30000)
     fig = go.Figure(go.Scattergl(x=td, y=pd_, name="Last", line=dict(color=COLORS[0], width=1)))
     fig.add_hline(y=s["P_avg_W"], line_dash="dash", line_color="black")
@@ -324,7 +334,7 @@ def page_profil():
     st.plotly_chart(plotly_layout(fig, 380), width="stretch")
     st.markdown("##### Abbildungen (Diss-Stil)")
     c1, c2 = st.columns(2)
-    ui.show_fig(pl.fig_peaks(res), "power_peaks", container=c1, plt_module=pl.plt)
+    ui.show_fig(pl.fig_peaks(res), "power_peaks", container=c1, plt_module=pl.plt, fx_keys=["fence"])
     ui.show_fig(pl.fig_fft(res), "power_fft", container=c2, plt_module=pl.plt)
     nav_buttons("profil")
 
@@ -373,13 +383,21 @@ def page_split():
         return
     L = res.load
     c = st.columns(5)
-    c[0].metric("E_DCH,max", f"{L['E_dch_J']:.1f} J")
-    c[1].metric("E_CH,max", f"{L['E_ch_J']:.1f} J")
-    c[2].metric("P_SC,max (SC-Seite)", f"{L['P_SC_max_W']:.0f} W")
+    ui.metric(c[0], "E_DCH,max", f"{L['E_dch_J']:.1f} J", key="E_dch")
+    ui.metric(c[1], "E_CH,max", f"{L['E_ch_J']:.1f} J", key="E_ch")
+    ui.metric(c[2], "P_SC,max (SC-Seite)", f"{L['P_SC_max_W']:.0f} W", key="P_sc_max",
+              calc=f"{L['P_peak_W']:.0f} W / {inp.req.eta_dch:.3f}")
     if inp.braking.enabled:
-        c[3].metric("E_Bremsung (SC-Seite)", f"{L['E_brake_J']:.0f} J", f"P = {L['P_brake_W']:.0f} W", delta_color="off")
-    c[4].metric("Energiedrift SC / Profil", f"{-np.sum(res.p_sc) * prof.dt:.0f} J",
-                help="Bilanz der SC-Energie über ein Profil. Verluste muss die Nachladung decken.")
+        ui.metric(c[3], "E_Bremsung (SC-Seite)", f"{L['E_brake_J']:.0f} J", f"P = {L['P_brake_W']:.0f} W",
+                  key="E_brake", calc=f"½ {inp.braking.mass_kg:g} kg ({inp.braking.v_mps:g} m/s)² x {inp.req.eta_ch:g}")
+    E_pre = -float(np.sum(res.p_sc)) * prof.dt
+    nw = int(round(float(inp.split.params.get("window_s", 0.1 * prof.t[-1])) / prof.dt))
+    nw = max(1, min(nw, len(res.p_sc) // 2))
+    E_in = -float(np.sum(res.p_sc[:nw])) * prof.dt
+    E_out = -float(np.sum(res.p_sc[-nw:])) * prof.dt
+    ui.metric(c[4], "Precharge-Energie (erste Ladung)", f"{E_pre:.0f} J",
+              f"Anlauf {E_in:.0f} J, Auslauf {E_out:.0f} J", key="E_pre",
+              calc=f"-∫P_SC dt = {E_pre:.0f} J; Anlauf/Auslauf = Randfenster {nw * prof.dt:.1f} s")
     td, pd_ = decimate_for_plot(prof.t, prof.p, 25000)
     tb, pb = decimate_for_plot(prof.t, res.p_bat, 25000)
     ts, ps = decimate_for_plot(prof.t, res.p_sc, 25000)
@@ -394,7 +412,7 @@ def page_split():
     legacy = inp.opt.energy_method == "zero_crossing_legacy" and inp.split.params.get("alignment") == "legacy_matlab"
     c1, c2 = st.columns(2)
     ui.show_fig(pl.fig_energy_excursions(res, "iecon" if legacy else "auto"), "energy_excursions", container=c1,
-                plt_module=pl.plt)
+                plt_module=pl.plt, fx_keys=["split", "eta", "E_dch", "E_ch"])
     with c2:
         st.markdown("**Filtervergleich**")
         cmp_names = st.multiselect("Strategien", list(REGISTRY), default=[inp.split.name],
@@ -419,10 +437,19 @@ def page_split():
     nav_buttons("split")
 
 
+def _take_I_rec(val: float):
+    inp.req.I_C0max_A = float(val)
+    st.session_state[W.key("ic0max")] = float(val)
+
+
+U_MODES = {"r_Q": "r_Q vorgeben (U_C0min = r_Q U_C0max)", "current": "aus Wandlerstrom (P_SC,max / I_C0max, Diss)",
+           "fixed": "U_C0min fest"}
+
+
 def page_spannung():
-    ui.step_header("SCHRITTE 1 BIS 3", "Modulspannungen und Lebensdauer",
-                   "U_C0max aus dem DC-Bus, Spannungsderating nach Arrhenius für die geforderte Lebensdauer, "
-                   "U_C0min aus Leistung und Stromgrenze, U_C0inM energiegewichtet.")
+    ui.step_header("SCHRITTE 1 BIS 3", "Modulspannungen, U_C0min und Wandlerstrom",
+                   "U_C0max aus dem DC-Bus, Spannungsderating nach Arrhenius für die Lebensdauer, U_C0min über das "
+                   "Entladeverhältnis r_Q (Start 0,5), daraus der nötige Strom des Interface-Wandlers.")
     r = inp.req
     with st.container(border=True):
         c = st.columns(4)
@@ -435,38 +462,76 @@ def page_spannung():
                  {"peak": "P_peak (Diss)", "peak_minus_avg": "P_peak - P_avg", "manual": "manuell"}, container=c[0])
         if r.P_max_mode == "manual":
             W.opt_num("P_SC,max [W]", r, "P_max_W", "pmaxw", 2643.0, container=c[1])
-        W.num("I_C0max [A]", r, "I_C0max_A", "ic0max", container=c[2], help="Modul- bzw. Wandler-Stromgrenze")
-        W.opt_num("U_C0min fest [V]", r, "U_C0min_override_V", "uminov", 33.0, container=c[3],
-                  help="Leer = P_SC,max / I_C0max. IECON 2023 nutzt 33 V.")
         series = ["(je Zelle aus DB)"] + list(db.lifetime.series_id)
         cur = inp.opt.series_override or series[0]
-        s = st.selectbox("Lebensdauer-Serie", series, index=series.index(cur) if cur in series else 0,
-                         key=W.key("series"))
-        inp.opt.series_override = None if s == series[0] else s
+        sser = c[2].selectbox("Lebensdauer-Serie", series, index=series.index(cur) if cur in series else 0,
+                              key=W.key("series"))
+        inp.opt.series_override = None if sser == series[0] else sser
+    with st.container(border=True):
+        st.markdown("**U_C0min**")
+        c = st.columns([1.5, 1, 0.2, 1.6])
+        W.select("Festlegung", r, "U_C0min_mode", "uminmode", U_MODES, container=c[0])
+        if r.U_C0min_mode == "r_Q":
+            W.num("r_Q = U_C0min / U_C0max", r, "r_Q", "rq", step=0.05, min_value=0.05, max_value=0.95, container=c[1],
+                  help="Start 0,5: 75 % der Energie nutzbar (1 - r_Q²).")
+        elif r.U_C0min_mode == "fixed":
+            if r.U_C0min_override_V is None:
+                r.U_C0min_override_V = 0.5 * (r.U_C0max_V or r.U_bus_V)
+            W.num("U_C0min [V]", r, "U_C0min_override_V", "uminfix", step=0.5, container=c[1])
+        W.opt_num("Wandler U_ein,min [V]", r, "U_conv_min_V", "uconv", 0.4 * (r.U_C0max_V or r.U_bus_V), container=c[3],
+                  help="Optional: minimale Eingangsspannung des Wandlers (Klemmenspannung). Prüfung in der Emulation.")
     res = compute()
     if not res.voltages:
         st.error(res.steps.get("2").summary if res.steps.get("2") else "Keine Spannungen berechnet.")
         return
     v = res.voltages
-    c = st.columns(5)
     si = next(iter(res.series_info.values()))
-    c[0].metric("U_C01max je Zelle", f"{si['U_C01max']:.3f} V")
-    c[1].metric("Zellen in Serie S", si["S"], f"U_C0N = {si['U_C0N']:.1f} V", delta_color="off")
-    c[2].metric("U_C0min", f"{v['U_C0min']:.2f} V", f"berechnet {v['U_C0min_calc']:.2f} V", delta_color="off")
-    c[3].metric("Nutzbare Energie", f"{100 * v['energy_ratio']:.0f} %", f"r_Q = {v['r_Q']:.2f}", delta_color="off")
-    c[4].metric("U_C0inM", " / ".join(f"{sc.U_inM:.1f}" for sc in res.scenarios.values()) + " V",
-                "Modul 1 / Modul 2", delta_color="off")
+    U_max = v["U_C0max"]
+    c = st.columns(5)
+    ui.metric(c[0], "U_C01max je Zelle", f"{si['U_C01max']:.3f} V", key="U_C01max",
+              calc=f"T = {r.T_cell_C:g} °C, t_life = {r.t_life_h:g} h")
+    ui.metric(c[1], "Zellen in Serie S", si["S"], f"U_C0N = {si['U_C0N']:.1f} V", key="S",
+              calc=f"ceil({U_max:.1f} V / {si['U_C01max']:.3f} V) = {si['S']}")
+    calc_u = {"r_Q": f"{r.r_Q:.2f} x {U_max:.1f} V = {v['U_C0min']:.2f} V",
+              "current": f"{res.load['P_SC_max_W']:.0f} W / {r.I_C0max_A:g} A = {v['U_C0min']:.2f} V",
+              "fixed": f"fest {v['U_C0min']:.2f} V"}[v["mode"]]
+    ui.metric(c[2], "U_C0min", f"{v['U_C0min']:.2f} V", U_MODES[v["mode"]].split(" (")[0], key="U_C0min",
+              calc=calc_u)
+    ui.metric(c[3], "Nutzbare Energie", f"{100 * v['energy_ratio']:.0f} %", f"r_Q = {v['r_Q']:.2f}", key="r_Q",
+              calc=f"1 - {v['r_Q']:.2f}² = {v['energy_ratio']:.2f}")
+    ui.metric(c[4], "U_C0inM", " / ".join(f"{sc.U_inM:.1f}" for sc in res.scenarios.values()) + " V",
+              "Modul 1 / Modul 2", key="U_C0inM")
     if res.steps["2"].status == "warning":
-        st.warning(res.steps["2"].summary)
-    st.latex(r"U_\mathrm{C01max}=U_\mathrm{C0N1}-\left(\log_2\frac{t_\mathrm{life}}{t_0}-\frac{T_0-T}{\Delta T}\right)"
-             r"\Delta U,\quad S=\left\lceil\frac{U_\mathrm{C0max}}{U_\mathrm{C01max}}\right\rceil,\quad "
-             r"U_\mathrm{C0min}=\frac{P_\mathrm{SC,max}}{I_\mathrm{C0max}}")
+        ui.warn(res.steps["2"].summary)
+    with st.container(border=True):
+        st.markdown("**Interface-Wandler: Strom aus dem Profil**")
+        c = st.columns(4)
+        I_rec = v["I_C0max_rec"]
+        ui.metric(c[0], "Spitzenstrom bei U_C0min", f"{I_rec:.1f} A", key="I_rec",
+                  calc=f"{res.load['P_SC_max_W']:.0f} W / {v['U_C0min']:.2f} V = {I_rec:.1f} A")
+        if v.get("I_rms_at_Umin") == v.get("I_rms_at_Umin"):
+            ui.metric(c[1], "Dauerstrom (RMS)", f"{v['I_rms_at_Umin']:.1f} A",
+                      f"typisch {v.get('I_rms_at_UinM', float('nan')):.1f} A bei U_C0inM", key="I_rec",
+                      calc=f"P_SC,RMS = {v['P_SC_rms']:.0f} W / {v['U_C0min']:.2f} V")
+        W.num("I_C0max (Wandler) [A]", r, "I_C0max_A", "ic0max", step=0.5, container=c[2],
+              help="Strombegrenzung des Interface-Wandlers. Geht in P_I und die Emulation ein.")
+        rec_val = math.ceil(I_rec * 10) / 10
+        c[3].button(f"Empfehlung {rec_val:g} A übernehmen", on_click=_take_I_rec, args=(rec_val,),
+                    key=W.key("take_irec"), width="stretch")
+        W.check(f"Ich bestätige I_C0max = {r.I_C0max_A:g} A für den Wandler", r, "I_C0max_confirmed", "ic0conf",
+                container=c[3])
+        if not r.I_C0max_confirmed:
+            ui.warn(f"I_C0max = {r.I_C0max_A:g} A ist nicht bestätigt. Empfehlung aus dem Profil: {I_rec:.1f} A "
+                    f"Spitze bei U_C0min, Dauerstrom {v.get('I_rms_at_Umin', float('nan')):.1f} A (RMS). Bitte prüfen "
+                    f"und bestätigen.")
+        ui.fx(["I_rec", "U_C0min", "r_Q", "P_I"])
     c1, c2 = st.columns(2)
-    ui.show_fig(pl.fig_lifetime(res, db), "lifetime_SC", container=c1, plt_module=pl.plt)
-    ui.show_fig(pl.fig_discharge_ratio(res), "dischargeratio", container=c2, plt_module=pl.plt)
+    ui.show_fig(pl.fig_lifetime(res, db), "lifetime_SC", container=c1, plt_module=pl.plt, fx_keys=["U_C01max", "S"])
+    ui.show_fig(pl.fig_discharge_ratio(res), "dischargeratio", container=c2, plt_module=pl.plt, fx_keys=["r_Q"])
     sk = st.selectbox("Spannungsdiagramm für", list(res.scenarios), format_func=lambda s: SCENARIOS[s],
                       index=len(res.scenarios) - 1, key=W.key("vlev"))
-    ui.show_fig(pl.fig_voltage_levels(res, sk), f"voltage_levels_{sk}", plt_module=pl.plt)
+    ui.show_fig(pl.fig_voltage_levels(res, sk), f"voltage_levels_{sk}", plt_module=pl.plt,
+                fx_keys=["U_C0min", "U_C0inM", "U_C01max"])
     nav_buttons("spannung")
 
 
@@ -489,15 +554,22 @@ def page_kapazitaet():
         with col.container(border=True):
             st.markdown(f"<div class='card-title'>{sc.label}</div>", unsafe_allow_html=True)
             m = st.columns(3)
-            m[0].metric("W_used", f"{sc.W_used_J:.0f} J", f"{sc.E_dch_J:.0f} + {sc.E_ch_J:.0f} J", delta_color="off")
-            m[1].metric("U_C0inM", f"{sc.U_inM:.2f} V")
-            m[2].metric("C_req", f"{sc.C_req:.3f} F")
+            ui.metric(m[0], "W_used", f"{sc.W_used_J:.0f} J", f"{sc.E_dch_J:.0f} + {sc.E_ch_J:.0f} J", key="C_req",
+                      calc=f"W_used = {sc.E_dch_J:.1f} J + {sc.E_ch_J:.1f} J")
+            ui.metric(m[1], "U_C0inM", f"{sc.U_inM:.2f} V", key="U_C0inM",
+                      calc=f"sqrt(({sc.E_dch_J:.0f} x {sc.U_max:.1f}² + {sc.E_ch_J:.0f} x {sc.U_min:.1f}²) / "
+                           f"{sc.W_used_J:.0f}) = {sc.U_inM:.2f} V")
+            ui.metric(m[2], "C_req", f"{sc.C_req:.3f} F", key="C_req",
+                      calc=f"2 x {sc.W_used_J:.0f} J / ({inp.req.L_EOL:g} ({sc.U_max:.1f}² - {sc.U_min:.1f}²) V²) = "
+                           f"{sc.C_req:.3f} F")
+    ui.fx(["C_req", "U_C0inM"])
     nav_buttons("kapazitaet")
 
 
-SEL_COLS = ["cell_id", "setup", "P_C", "P_I", "P_T", "C_cell_used_F", "ESR_cell_mOhm", "C_module_F", "C_reserve",
+SEL_COLS = ["cell_id", "setup", "P_driver", "P_C", "P_I", "P_T", "C_cell_used_F", "ESR_cell_mOhm", "C_module_F",
+            "C_reserve", "C_reserve_BOL",
             "ESR_module_mOhm", "I_module_max_A", "cost_EUR", "mass_kg", "volume_dm3", "P_loss_avg_W", "dT_max_K",
-            "pcb_mm", "density_kg_dm3", "status", "warnings"]
+            "dT_net_max_K", "pcb_mm", "density_kg_dm3", "status", "warnings"]
 
 
 def page_zellen():
@@ -524,7 +596,7 @@ def page_zellen():
             o.cfit_dataset = c[2].selectbox("Datensatz", dsets, index=dsets.index(o.cfit_dataset), key=W.key("cds"))
         if o.geometry == "pcb":
             pcb_options(o)
-        spec_options(inp.req)
+        spec_summary(inp.req)
         with st.expander("Kandidatenzellen"):
             allc = list(db.cells.cell_id)
             dflt = o.candidate_ids or list(db.cells[db.cells.candidate].cell_id)
@@ -541,12 +613,16 @@ def page_zellen():
         if (~df.feasible).any():
             st.caption(f"{int((~df.feasible).sum())} Konfiguration(en) außerhalb der Vorgabe stehen unten "
                        f"(Spalte Status) und sind in den Abbildungen ausgegraut.")
-        ev = ui.table(dfo, SEL_COLS, key=W.key(f"tbl_{sk}"), selectable=True)
+        ev = ui.table(dfo, SEL_COLS, key=W.key(f"tbl_{sk}"), selectable=True,
+                      fx_keys=["P_C", "P_I", "P_T", "P_driver", "C_eq", "C_mod", "reserve", "mass", "cost", "P_loss",
+                               "R_th_eff"])
         rows = ev.selection.rows if ev is not None and hasattr(ev, "selection") else []
         if rows:
             cid = dfo.iloc[rows[0]].cell_id
             st.session_state["detail_cell"], st.session_state["detail_scen"] = cid, sk
             st.button(f"{ui.short(cid)} im Zelldetail öffnen", on_click=go_to, args=("detail",), key=W.key(f"od_{sk}"))
+    if res.candidates:
+        space_section(res)
     if res.candidates and o.geometry == "pcb":
         layout_section(res)
     if res.skipped_cells:
@@ -581,12 +657,29 @@ def pcb_options(o):
         W.num("Signalstecker T [mm]", o, "conn_signal_d_mm", "csd", 1.0, min_value=0.0, container=c[3])
 
 
-def spec_options(r):
-    with st.expander("Vorgaben (Bauraum, Masse, Kosten)", expanded=any(
-            getattr(r, k) is not None for k in ("max_width_mm", "max_depth_mm", "max_height_mm", "max_volume_dm3",
-                                                "max_mass_kg", "max_cost_EUR"))):
-        st.caption("Konfigurationen, die eine Vorgabe verletzen, werden als unzulässig markiert und in allen "
-                   "Abbildungen ausgegraut. Breite und Tiefe steuern zusätzlich die Wahl des Layouts.")
+SPEC_KEYS = ("max_width_mm", "max_depth_mm", "max_height_mm", "max_volume_dm3", "max_mass_kg", "max_cost_EUR")
+
+
+def spec_summary(r):
+    act = [(k, getattr(r, k)) for k in SPEC_KEYS if getattr(r, k) is not None]
+    names = dict(max_width_mm="Breite", max_depth_mm="Tiefe", max_height_mm="Höhe", max_volume_dm3="Volumen",
+                 max_mass_kg="Masse", max_cost_EUR="Kosten")
+    units = dict(max_width_mm="mm", max_depth_mm="mm", max_height_mm="mm", max_volume_dm3="dm³", max_mass_kg="kg",
+                 max_cost_EUR="€")
+    c = st.columns([4, 1])
+    if act:
+        c[0].markdown("**Bauraum und Vorgaben:** " + ", ".join(f"{names[k]} ≤ {v:g} {units[k]}" for k, v in act))
+    else:
+        c[0].caption("Keine Bauraum-Vorgabe gesetzt.")
+    c[1].button("Bauraum ändern", on_click=go_to, args=("profil",), key=W.key("go_spec"), width="stretch")
+
+
+def spec_options(r, expanded: bool = False):
+    with st.expander("Bauraum und Vorgaben (Modulgröße, Masse, Kosten)", expanded=expanded or any(
+            getattr(r, k) is not None for k in SPEC_KEYS)):
+        st.caption("Bauraum für das Modul (Leiterplatte von oben: Breite = Front mit Steckern, Tiefe = nach hinten, "
+                   "Höhe = Zelllänge + Leiterplatte + Abstand). Konfigurationen, die eine Vorgabe verletzen, sind "
+                   "unzulässig und in allen Abbildungen grau. Breite und Tiefe steuern auch die Wahl des Layouts.")
         c = st.columns(3)
         W.opt_num("Breite max [mm]", r, "max_width_mm", "mxw", 200.0, container=c[0])
         W.opt_num("Tiefe max [mm]", r, "max_depth_mm", "mxd", 200.0, container=c[1])
@@ -597,8 +690,56 @@ def spec_options(r):
         W.opt_num("Kosten max [€]", r, "max_cost_EUR", "mxc", 300.0, container=c[2])
 
 
+def layout_extent(res) -> tuple:
+    """Largest PCB (width, depth) of all candidates and both packings: common scale for every layout view."""
+    W_, D_ = 0.0, 0.0
+    for df in res.candidates.values():
+        for _, r in df.iterrows():
+            cell = db.cell(r.cell_id)
+            for lay in layout_pair(cell, int(r.S), int(r.P), inp.opt, inp.req):
+                if lay is not None:
+                    W_, D_ = max(W_, lay.width_mm), max(D_, lay.depth_mm)
+    return (W_, D_) if W_ else None
+
+
+def space_section(res):
+    """'Only the space is given': largest P that fits per cell and which requirements it meets."""
+    r = inp.req
+    if all(getattr(r, k) is None for k in SPEC_KEYS):
+        return
+    st.markdown("#### Was passt in den Bauraum?")
+    sk = list(res.candidates)[-1]
+    sc = res.scenarios[sk]
+    rows = []
+    for _, row in res.candidates[sk].iterrows():
+        cell = db.cell(row.cell_id)
+        S = int(row.S)
+        Pm = max_P_in_space(cell, S, inp.opt, r)
+        C_cell = float(row.C_cell_used_F)
+        C_m = Pm * C_cell / S if Pm else 0.0
+        R_m = S * float(row.ESR_cell_mOhm) / Pm if Pm else float("nan")
+        P_need = int(row.P)
+        rows.append({"Zelle": ui.short(row.cell_id), "S": S, "P benötigt": P_need, "P max im Bauraum": Pm,
+                     "passt": "ja" if Pm >= P_need else "nein",
+                     "C Modul bei P max [F]": C_m,
+                     "E nutzbar EOL [J]": 0.5 * C_m * r.L_EOL * (sc.U_max ** 2 - sc.U_min ** 2),
+                     "I max Modul [A]": Pm * float(cell["i_max_A"]), "ESR Modul [mΩ]": R_m,
+                     "C_req erfüllt": "ja" if Pm >= int(row.P_C) else "nein",
+                     "Strom erfüllt": "ja" if Pm >= int(row.P_I) else "nein",
+                     "Thermik erfüllt": ("ja" if Pm >= P_need else "nein") if row.P_T == row.P_T else "-"})
+    d = pd.DataFrame(rows)
+    st.caption(f"{sc.label}: je Zelle das größte P, dessen Modul (Layout {PACKINGS.get(inp.opt.packing)}) in den "
+               f"Bauraum passt, und welche Anforderungen damit erfüllt sind. Thermik erfüllt = P max >= P "
+               f"(inklusive P_T und thermischer Erhöhung).")
+    st.dataframe(d.round(2), hide_index=True, width="stretch")
+    n_ok = int((d["passt"] == "ja").sum())
+    if n_ok == 0:
+        ui.warn("Keine Zelle erfüllt alle Anforderungen im vorgegebenen Bauraum.")
+
+
 def layout_section(res):
-    st.markdown("#### Leiterplatten-Layout")
+    st.markdown("#### Leiterplatten-Layout (Modulvolumen, Standard hexagonal)")
+    st.caption("Alle Module im selben Maßstab: das größte Modul aller Kandidaten füllt den Rahmen.")
     keys = list(res.candidates)
     c = st.columns([1, 1.4, 2])
     sk = c[0].selectbox("Szenario", keys, index=len(keys) - 1, format_func=lambda s: SCENARIOS[s],
@@ -615,34 +756,52 @@ def layout_section(res):
         return
     main = hx if inp.opt.packing == "hex" else sq
     m_cells = int(row.S) * int(row.P) * float(cell["mass_g"]) / 1000
+    m_mod = m_cells + main.pcb_mass_kg(inp.opt.pcb_areal_mass_g_cm2)
     with c[2]:
         cc = st.columns(3)
-        cc[0].metric("Platine", f"{main.width_mm:.0f} x {main.depth_mm:.0f} mm")
-        cc[1].metric("Volumen", f"{main.volume_dm3:.2f} dm³")
-        cc[2].metric("Moduldichte", f"{(m_cells + main.pcb_mass_kg(inp.opt.pcb_areal_mass_g_cm2)) / main.volume_dm3:.2f} kg/dm³")
+        ui.metric(cc[0], "Platine", f"{main.width_mm:.0f} x {main.depth_mm:.0f} mm", key="layout",
+                  calc=f"p = {main.d_mm:g} + {main.gap_mm:g} mm, {main.label()}")
+        ui.metric(cc[1], "Modulvolumen", f"{main.volume_dm3:.2f} dm³", key="mass",
+                  calc=f"{main.width_mm:.0f} x {main.depth_mm:.0f} x {main.height_mm:.1f} mm")
+        ui.metric(cc[2], "Moduldichte", f"{m_mod / main.volume_dm3:.2f} kg/dm³", key="mass",
+                  calc=f"({m_cells:.3f} kg Zellen + {main.pcb_mass_kg(inp.opt.pcb_areal_mass_g_cm2):.3f} kg "
+                       f"Leiterplatte) / {main.volume_dm3:.3f} dm³")
     for n in main.notes:
-        st.warning(n)
+        ui.warn(n)
     if not row.feasible:
-        st.warning(f"{ui.short(cid)}: {row.status}")
-    ui.show_fig(pl.fig_layout_compare(sq, hx, m_cells, inp.opt.pcb_areal_mass_g_cm2),
-                f"layout_compare_{ui.short(cid).replace(' ', '_')}_{row.setup.replace('/', 'x')}", plt_module=pl.plt)
+        ui.warn(f"{ui.short(cid)}: {row.status}")
+    ui.show_fig(pl.fig_layout_compare(sq, hx, m_cells, inp.opt.pcb_areal_mass_g_cm2, extent=layout_extent(res)),
+                f"layout_compare_{ui.short(cid).replace(' ', '_')}_{row.setup.replace('/', 'x')}", plt_module=pl.plt,
+                fx_keys=["layout", "mass"])
 
 
-TH_COLS = ["cell_id", "setup", "P_T", "I_cell_rms_A", "ESR_cell_mOhm", "R_th_KperW", "k_coupling", "R_th_eff_KperW",
-           "dT_max_K", "T_cell_max_C", "thermal_status", "warnings"]
+TH_COLS = ["cell_id", "setup", "P_driver", "P_T", "I_cell_rms_A", "ESR_cell_mOhm", "R_th_KperW", "k_coupling",
+           "R_th_eff_KperW", "dT_max_K", "dT_net_max_K", "dT_net_centre_K", "dT_net_outer_K", "T_cell_max_C",
+           "thermal_status", "warnings"]
+
+TH_SOURCES = """
+- **Einzelzellmodell**: Diss Anhang A01 (C_th dΔT/dt = P_v - ΔT/R_th), R_th = 22,1 K/W und C_th = 19,7 J/K aus
+  eigener Messung (Diss Kap. 5, Tab. thermal_sim_conditions).
+- **Blockmodell (Lumped)**: R_th,eff = k R_th, k = n A_Zelle / A_Box. Newton-Kühlung und Lumped Capacitance nach
+  Incropera et al., *Fundamentals of Heat and Mass Transfer*, Kap. 5 (gültig für Bi < 0,1). Anwendung auf
+  SC-Module: Annahme, nicht validiert, liefert nur einen Mittelwert.
+- **Netzwerkmodell (Precheck)**: Spezifikation Andy; R_gap nach MathWorks (Model Heat Exchange Between Cells);
+  Netzwerkansatz für SC-Stacks: Hijazi et al., IEEE TIE 59(2), 2012. Nicht validiert.
+"""
 
 
 def page_thermik():
     ui.step_header("SCHRITTE 7 BIS 10", "Thermische Prüfung",
-                   "Verluste I²ESR je Zelle, Temperatur mit R_th und C_th (1. Ordnung) über das Profil. "
-                   "Die Modellstufen zeigen, wie stark Packung, Zellgröße und Alterung den Anstieg erhöhen.")
+                   "Verluste i² ESR je Zelle, Temperatur mit R_th und C_th (1. Ordnung) über das Profil. Zusätzlich "
+                   "das Netzwerkmodell mit Temperaturverteilung von innen nach außen (Precheck).")
     o, r = inp.opt, inp.req
     with st.container(border=True):
         c = st.columns(3)
         W.select("R_th / C_th", o, "thermal_mode", "thm", THERMAL_MODES, container=c[0])
-        W.select("Wärmeabfuhr", o, "thermal_coupling", "thc_coup", COUPLING_MODES, container=c[1])
+        W.select("Wärmeabfuhr (Lumped)", o, "thermal_coupling", "thc_coup", COUPLING_MODES, container=c[1])
         if o.thermal_coupling == "packed_block":
-            W.num("Abstand zwischen Zellen [mm]", o, "cell_spacing_mm", "gap", container=c[2])
+            W.num("Abstand zwischen Zellen [mm]", o, "cell_spacing_mm", "gap", container=c[2],
+                  help="Gilt auch für das Layout und den Luftspalt im Netzwerkmodell.")
         elif o.thermal_coupling == "factor":
             W.num("Faktor auf R_th", o, "thermal_coupling_factor", "kfac", container=c[2])
         c = st.columns(4)
@@ -655,6 +814,12 @@ def page_thermik():
         W.num("ΔT_max [K]", r, "dT_max_K", "dtmax", container=c[3])
         c = st.columns(4)
         W.num("T_amb [°C]", r, "T_amb_C", "tamb", container=c[0])
+        if o.thermal_network:
+            W.check("Strahlung oben (Netzwerk)", o, "net_radiation", "netrad", container=c[1])
+            W.num("Emissionsgrad ε", o, "net_eps", "neteps", step=0.01, container=c[2])
+            W.check("Netzwerk für Auslegung (P erhöhen)", o, "net_use_for_design", "netdes", container=c[3],
+                    help="P erhöhen, bis die heißeste Zelle im Netzwerkmodell unter ΔT_max liegt. Aus = nur Prüfung.")
+        st.markdown(TH_SOURCES)
     res = compute()
     if not res.candidates:
         st.info("Keine Kandidaten.")
@@ -662,32 +827,163 @@ def page_thermik():
     sk = st.selectbox("Szenario", list(res.candidates), index=len(res.candidates) - 1,
                       format_func=lambda s: SCENARIOS[s], key=W.key("th_scen"))
     df = res.candidates[sk]
-    ui.table(df, TH_COLS, key=W.key(f"th_tbl_{sk}"))
+    ui.table(df, TH_COLS if o.thermal_network else [c_ for c_ in TH_COLS if not c_.startswith("dT_net")],
+             key=W.key(f"th_tbl_{sk}"), fx_keys=["P_T", "th_first", "R_th_eff", "th_scale", "esr_eol", "net"])
     if df.dT_max_K.notna().any():
-        ui.show_fig(pl.fig_dT_candidates(df, r.dT_max_K), f"dT_candidates_{sk}", plt_module=pl.plt)
+        ui.show_fig(pl.fig_dT_candidates(df, r.dT_max_K), f"dT_candidates_{sk}", plt_module=pl.plt,
+                    fx_keys=["th_first", "R_th_eff"])
         cands = list(df[df.dT_max_K.notna()].cell_id)
         dflt = selected_cell(sk) if selected_cell(sk) in cands else cands[0]
         cid = st.selectbox("Aufschlüsselung für Zelle", cands, index=cands.index(dflt), format_func=ui.short,
                            key=W.key(f"th_cell_{sk}_{dflt}"))
         det = res.details[sk][cid]
         row = df[df.cell_id == cid].iloc[0]
-        st.markdown(f"**{ui.short(cid)} {row.setup}**: Block {row.block_mm} mm, I_Zelle,RMS = {row.I_cell_rms_A:.2f} A")
+        st.markdown(f"**{ui.short(cid)} {row.setup}**: Platine {row.pcb_mm} mm, I_Zelle,RMS = {row.I_cell_rms_A:.2f} A")
         c1, c2 = st.columns(2)
         if det.breakdown:
             ui.show_fig(pl.fig_thermal_breakdown(det.breakdown, r.dT_max_K), f"thermal_breakdown_{cid}",
-                        container=c1, plt_module=pl.plt)
+                        container=c1, plt_module=pl.plt, fx_keys=["th_first", "th_scale", "R_th_eff", "esr_eol"])
         if det.dT is not None:
             ui.show_fig(pl.fig_thermal(det, res.scenarios[sk], r.dT_max_K), f"thermal_{cid}", container=c2,
-                        plt_module=pl.plt)
+                        plt_module=pl.plt, fx_keys=["th_first"])
         with st.expander("Rechenweg"):
             st.code("\n".join(det.log))
             for w in det.warnings:
-                st.warning(w)
+                ui.warn(w)
+        if o.thermal_network:
+            network_section(res, sk, cid, row, det)
+        else:
+            st.info("Netzwerkmodell ist auf der Startseite ausgeschaltet.")
+    if o.thermal_network:
+        network_ideal_section()
     nav_buttons("thermik")
 
 
-RANK_COLS = ["rank", "cell_id", "setup", "score", "cost_EUR", "mass_kg", "volume_dm3", "P_loss_avg_W", "dT_max_K",
-             "n_cells", "C_reserve", "C_source"]
+def network_section(res, sk, cid, row, det):
+    """Andy's thermal network on the real PCB layout of the chosen configuration (precheck)."""
+    o, r = inp.opt, inp.req
+    st.markdown("#### Netzwerkmodell auf dem Leiterplatten-Layout (Precheck)")
+    net = det.network
+    if net is None:
+        st.info("Kein Netzwerkergebnis (braucht R_th/C_th, ein Profil und das Leiterplatten-Layout).")
+        return
+    s_ = net.summary()
+    c = st.columns(6)
+    ui.metric(c[0], "Mitte ΔT", f"{s_['dT_centre_K']:.1f} K", key="net")
+    ui.metric(c[1], "Heißeste ΔT", f"{s_['dT_max_K']:.1f} K", key="net")
+    ui.metric(c[2], "Außen ΔT", f"{s_['dT_outer_mean_K']:.1f} K", key="net")
+    ui.metric(c[3], "Mitte - außen", f"{s_['dT_centre_outer_K']:.1f} K", key="net")
+    ui.metric(c[4], "R_gap", f"{s_['R_gap_KperW']:.1f} K/W", f"s = {net.params.s_mm:g} mm", key="R_gap",
+              calc=f"r = {net.params.d_mm / 2:g} mm, L = {net.params.L_mm:g} mm, λ = {net.params.lam:g} W/(m K)")
+    ui.metric(c[5], "P Zelle", f"{s_['P_cell_W'] * 1000:.0f} mW", f"{s_['P_total_W']:.1f} W, "
+              f"{s_['N']} Zellen", key="th_first",
+              calc=f"{row.I_cell_rms_A:.2f}² A² x {row.ESR_cell_mOhm * o.thermal_esr_factor:.1f} mΩ")
+    c = st.columns(4)
+    c[0].caption(f"Lokale Luft Mitte {s_['T_air_centre_C']:.1f} °C, außen {s_['T_air_outer_mean_C']:.1f} °C")
+    if o.net_radiation:
+        c[1].caption(f"Strahlung gesamt {s_['Q_rad_total_W'] * 1000:.0f} mW (ε = {o.net_eps:g})")
+    if s_["dT_max_K"] > r.dT_max_K:
+        ui.warn(f"Heißeste Zelle {s_['dT_max_K']:.1f} K über ΔT_max = {r.dT_max_K:g} K (Netzwerk, Precheck).")
+    ext = layout_extent(res)
+    c1, c2 = st.columns(2)
+    ui.show_fig(pl.fig_network_heatmap(net, extent=ext), f"network_{ui.short(cid).replace(' ', '_')}_{row.setup.replace('/', 'x')}",
+                container=c1, plt_module=pl.plt, fx_keys=["net", "R_gap", "Q_rad"])
+    with c2:
+        t_end = st.select_slider("Aufheizen bis [min]", [30, 60, 120, 240, 480], value=120, key=W.key("net_tend"))
+        t, T = _net_transient(net, (cid, row.setup, round(net.P_cell_W, 9), net.params.s_mm, net.params.radiation,
+                                    net.params.eps, net.params.R_air, net.grid.n), 60.0 * t_end)
+        ui.show_fig(pl.fig_network_transient(t, T, net.grid, net.params.T_inf_C, r.dT_max_K),
+                    f"network_heating_{ui.short(cid).replace(' ', '_')}", plt_module=pl.plt, fx_keys=["net"])
+    # comparison of the models (to-do 2)
+    th = det.thermal or {}
+    P_v = net.P_cell_W
+    rth = th.get("rth", float("nan"))
+    k = row.k_coupling if row.k_coupling == row.k_coupling else 1.0
+    cmp_rows = [
+        {"Modell": "Einzelzelle (k = 1), Mittelwert", "ΔT [K]": P_v * rth, "Herkunft": "Andy (Diss A01, Messung)"},
+        {"Modell": f"Block/Lumped (k = {k:.2f}), Mittelwert", "ΔT [K]": P_v * rth * k,
+         "Herkunft": "Annahme Claude, Incropera Kap. 5"},
+        {"Modell": "Block/Lumped transient (Tabelle, Maximum)", "ΔT [K]": row.dT_max_K, "Herkunft": "wie oben"},
+        {"Modell": "Netzwerk: Mitte", "ΔT [K]": s_["dT_centre_K"], "Herkunft": "Spezifikation Andy"},
+        {"Modell": "Netzwerk: heißeste Zelle", "ΔT [K]": s_["dT_max_K"], "Herkunft": "Spezifikation Andy"},
+        {"Modell": "Netzwerk: Randzellen (Mittel)", "ΔT [K]": s_["dT_outer_mean_K"], "Herkunft": "Spezifikation Andy"},
+    ]
+    with st.expander("Vergleich der Modelle", expanded=True):
+        st.dataframe(pd.DataFrame(cmp_rows).round(2), hide_index=True, width="stretch")
+        st.caption("Einzelzelle und Block geben eine Temperatur für alle Zellen (kein Gradient). Das Netzwerk "
+                   "verteilt die Wärme über Nachbarn und lokale Luft. Der Gradient im Netzwerk kommt vor allem aus "
+                   "der Mittelungsregel der lokalen Luft (Gleichgewichtung, nicht gemessen), weil R_gap etwa zehnmal "
+                   "größer ist als R_air.")
+    with st.expander("Vergleich mit einer Messung (Precheck prüfen)"):
+        st.caption("Messwerte eintragen. Für einen belastbaren Vergleich müssen Messorte, Zeitpunkt, Zellanzahl, "
+                   "Verlustleistung je Zelle und Umgebung zum Modell passen.")
+        c = st.columns(4)
+        m_in = c[0].number_input("ΔT innen gemessen [K]", value=0.0, key=W.key("meas_in"))
+        m_out = c[1].number_input("ΔT außen gemessen [K]", value=0.0, key=W.key("meas_out"))
+        if m_in or m_out:
+            c[2].metric("Abweichung innen", f"{s_['dT_centre_K'] - m_in:+.1f} K")
+            c[3].metric("Abweichung außen", f"{s_['dT_outer_mean_K'] - m_out:+.1f} K",
+                        f"Gradient Modell {s_['dT_centre_outer_K']:.1f} K / Messung {m_in - m_out:.1f} K",
+                        delta_color="off", delta_arrow="off")
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _ideal(arr: str, nl: int, Pc: float, sg: float, rad: bool, eps: float, lam: float, T_inf: float):
+    p = TN.NetworkParams(s_mm=sg, radiation=rad, eps=eps, lam=lam, T_inf_C=T_inf)
+    net = TN.steady_state(TN.ring_grid(arr, nl, p.d_mm + sg), p, Pc)
+    rows, conv, nconv = TN.layer_study(arr, p, Pc)
+    t, T = TN.transient(net.grid, p, Pc, t_end_s=7200, n_points=150)
+    return net, rows, conv, nconv, t, T
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _net_transient(_net, key: tuple, t_end_s: float):
+    return TN.transient(_net.grid, _net.params, _net.P_cell_W, t_end_s=t_end_s, n_points=200)
+
+
+def network_ideal_section():
+    """Andy's demo: ideal square or hexagonal arrangement grown in layers around a centre cell."""
+    o, r = inp.opt, inp.req
+    with st.expander("Netzwerkmodell: ideale Anordnung mit Nachbarschichten (Spezifikation, Abschnitt 11)"):
+        c = st.columns(5)
+        arr = c[0].selectbox("Anordnung", ["hex", "square"], format_func={"hex": "hexagonal (z = 6)",
+                                                                           "square": "quadratisch (z = 4)"}.get,
+                             key=W.key("ni_arr"))
+        nl = int(c[1].number_input("Nachbarschichten", 0, 12, 3, key=W.key("ni_n")))
+        Pc = c[2].number_input("Verlust je Zelle [W]", 0.0, 10.0, 0.7, 0.05, key=W.key("ni_p"))
+        sg = c[3].number_input("kleinster Abstand s [mm]", 0.0, 20.0, 0.0, 0.1, key=W.key("ni_s"))
+        rad = c[4].checkbox("Strahlung", value=True, key=W.key("ni_rad"))
+        net, rows, conv, nconv, t, T = _ideal(arr, nl, float(Pc), float(sg), bool(rad), float(o.net_eps),
+                                              float(o.net_lambda), float(r.T_amb_C))
+        p = net.params
+        s_ = net.summary()
+        c = st.columns(5)
+        c[0].metric("Zellen / P gesamt", f"{s_['N']}", f"{s_['P_total_W']:.1f} W", delta_color="off", delta_arrow="off")
+        c[1].metric("T Mitte", f"{s_['T_centre_C']:.1f} °C", f"Luft {s_['T_air_centre_C']:.1f} °C", delta_color="off", delta_arrow="off")
+        c[2].metric("T außen (Mittel)", f"{s_['T_outer_mean_C']:.1f} °C", f"Luft {s_['T_air_outer_mean_C']:.1f} °C",
+                    delta_color="off", delta_arrow="off")
+        c[3].metric("Mitte - außen", f"{s_['dT_centre_outer_K']:.1f} K")
+        c[4].metric("R_gap / Strahlung", f"{s_['R_gap_KperW']:.1f} K/W", f"{s_['Q_rad_total_W'] * 1000:.0f} mW",
+                    delta_color="off", delta_arrow="off")
+        if conv:
+            st.success(f"Schichtkonvergenz: |ΔT_Mitte| < 0,05 K bei zwei Erweiterungen nach {nconv} Schichten.")
+        else:
+            ui.warn(f"Schichtkonvergenz bis {nconv} Schichten nicht erreicht (keine Aussage über die stationäre "
+                    f"Rechnung selbst).")
+        c1, c2, c3 = st.columns(3)
+        ui.show_fig(pl.fig_network_heatmap(net), f"network_ideal_{arr}_{nl}", container=c1, plt_module=pl.plt,
+                    fx_keys=["net", "R_gap", "Q_rad"])
+        ui.show_fig(pl.fig_network_layers(rows, r.dT_max_K), f"network_layers_{arr}", container=c2, plt_module=pl.plt)
+        ui.show_fig(pl.fig_network_transient(t, T, net.grid, p.T_inf_C, r.dT_max_K), f"network_ideal_heating_{arr}",
+                    container=c3, plt_module=pl.plt)
+        st.dataframe(pd.DataFrame([{"Schichten": x["layers"], "Zellen": x["N"], "T Mitte [°C]": x["T_centre_C"],
+                                    "T außen [°C]": x["T_outer_mean_C"], "Änderung Mitte [K]": x["delta_centre_K"]}
+                                   for x in rows]).round(3), hide_index=True, width="stretch")
+
+
+RANK_COLS = ["rank", "cell_id", "setup", "score", "cost_EUR", "mass_kg", "volume_dm3", "density_kg_dm3",
+             "P_loss_avg_W", "dT_max_K", "dT_net_max_K", "n_cells", "P_driver", "C_reserve", "C_reserve_BOL",
+             "C_source"]
 
 
 def page_tradeoff():
@@ -719,7 +1015,7 @@ def page_tradeoff():
         cur_sel = selected_cell(sk)
         c = st.columns([1, 1, 1.4])
         c[0].metric("Empfehlung (beste Bewertung)", ui.short(best) if best else "-",
-                    f"{feas.iloc[0].score:.0f} %" if best else None, delta_color="off")
+                    f"{feas.iloc[0].score:.0f} %" if best else None, delta_color="off", delta_arrow="off")
         pk = res.picks.get(sk, {}).get("min_cost")
         c[1].metric("Günstigste", ui.short(pk["cell_id"]) if pk else "-")
         with c[2]:
@@ -735,16 +1031,16 @@ def page_tradeoff():
                 inp.selected.pop(sk, None)
                 st.rerun()
             st.caption(f"Aktuell gewählt: **{ui.short(cur_sel) if cur_sel else 'keine'}**")
-        ui.table(feas, RANK_COLS, key=W.key(f"rank_{sk}"))
+        ui.table(feas, RANK_COLS, key=W.key(f"rank_{sk}"), fx_keys=["score", "cost", "mass", "P_loss", "reserve"])
         s, contrib = score(feas, base, o.reserve_cap)
         ranked = feas.assign(score=s).sort_values("score", ascending=False)
-        ui.show_fig(pl.fig_scores(ranked, contrib), f"scores_{sk}", plt_module=pl.plt)
+        ui.show_fig(pl.fig_scores(ranked, contrib), f"scores_{sk}", plt_module=pl.plt, fx_keys=["score"])
     if res.candidates:
         st.markdown("#### Übersicht wie IECON 2023 (Kosten und Moduldichte über Zellkapazität, Farbe = Modul-ESR, "
                     "grau = außerhalb der Vorgabe)")
         c1, c2 = st.columns([1, 1])
         ui.show_fig(pl.fig_tradeoff(res, scenarios=tuple(res.candidates)), "Modules_Cells", container=c1,
-                    plt_module=pl.plt)
+                    plt_module=pl.plt, fx_keys=["cost", "mass", "C_mod"])
         with c2:
             axes_opts = {"cost_EUR": "Kosten [€]", "mass_kg": "Masse [kg]", "volume_dm3": "Volumen [dm³]",
                          "ESR_module_mOhm": "ESR [mΩ]", "P_loss_avg_W": "Verluste [W]", "dT_max_K": "ΔT [K]",
@@ -822,7 +1118,8 @@ def page_emulation():
         with st.spinner("Emuliere ..."):
             for cid in cells:
                 cfg = EmulationConfig(dt_bin_s=dtb, K_soc_per_s=K, P_rech_max_W=Prm, soc_target=tgt,
-                                      eta_dch=eta_d / 100, eta_ch=eta_c / 100)
+                                      eta_dch=eta_d / 100, eta_ch=eta_c / 100, U_conv_min_V=inp.req.U_conv_min_V,
+                                      U_bus_V=inp.req.U_bus_V)
                 out[cid] = emulation_design(res, sk, cid, cfg, check_eol=eol, include_braking=brk)
         st.session_state["emu_result"] = (cfg_key, out)
     stored = st.session_state.get("emu_result")
@@ -830,7 +1127,7 @@ def page_emulation():
         st.info("Einstellungen prüfen und auf 'Emulationsbasierte Auslegung rechnen' klicken.")
         return
     if stored[0] != cfg_key:
-        st.warning("Einstellungen geändert: Ergebnisse unten gehören zu den vorherigen Einstellungen. Neu rechnen.")
+        ui.warn("Einstellungen geändert: Ergebnisse unten gehören zu den vorherigen Einstellungen. Neu rechnen.")
     out = stored[1]
     sc = res.scenarios[sk]
     rows = []
@@ -839,8 +1136,12 @@ def page_emulation():
         crow = res.candidates[sk].set_index("cell_id").loc[cid]
         cell = db.cell(cid)
         n = d.S * d.P_final
+        lay = layout_for(cell, d.S, d.P_final, inp.opt, inp.req)
+        m_mod = n * cell["mass_g"] / 1000 + (lay.pcb_mass_kg(inp.opt.pcb_areal_mass_g_cm2) if lay else 0.0)
         rows.append({"Zelle": ui.short(cid), "P/S analytisch": crow.setup, "P/S Emulation": f"{d.P_final}/{d.S}",
-                     "Zellen": n, "Kosten [€]": n * cell["price_EUR"], "Masse [kg]": n * cell["mass_g"] / 1000,
+                     "Zellen": n, "Kosten [€]": n * cell["price_EUR"], "Masse [kg]": m_mod,
+                     "Modulvolumen [dm³]": lay.volume_dm3 if lay else float("nan"),
+                     "Platine [mm]": f"{lay.width_mm:.0f} x {lay.depth_mm:.0f}" if lay else "",
                      "Energiehub [J]": last.E_swing_J, "C_req,emu [F]": last.C_req_emu_F,
                      "C Modul [F]": last.C_module_F, "I_peak [A]": last.I_peak_A,
                      "I_Zelle RMS [A]": last.I_rms_cell_A, "ΔT max [K]": last.dT_max_K,
@@ -867,8 +1168,10 @@ def page_emulation():
                                     "E_loss_conv_J": "Wandlerverlust [J]", "cycles": "Zyklen", "ok": "ok",
                                     "reason": "Begründung"})
             st.dataframe(it.round(2), hide_index=True, width="stretch")
-            ui.show_fig(pl.fig_emulated_profile(d.trace, d.module, sc, i_limit=d.module.I_max_A),
-                        f"emulated_profile_{cid}_{d.P_final}", plt_module=pl.plt)
+            ui.show_fig(pl.fig_emulated_profile(d.trace, d.module, sc, i_limit=d.module.I_max_A,
+                                                u_conv_min=inp.req.U_conv_min_V),
+                        f"emulated_profile_{cid}_{d.P_final}", plt_module=pl.plt,
+                        fx_keys=["eta", "I_sc", "P_limit", "U_term", "P_rech", "th_first"])
             if d.chain is not None:
                 ch = d.chain
                 st.markdown("**Zelltemperatur aus dem Zellstrom** (volle Auflösung, je Zeitschritt)")
@@ -884,15 +1187,15 @@ def page_emulation():
                 m[1].metric("ESR Zelle (Verluste)", f"{d.R_esr_cell_used * 1000:.1f} mΩ")
                 m[2].metric("p_v Mittel", f"{ch['P_v_mean']:.2f} W")
                 m[3].metric("R_th,eff / τ", f"{d.module.R_th:.1f} K/W / {ch['tau_s']:.0f} s")
-                m[4].metric("ΔT max", f"{ch['dT_max']:.1f} K", f"stationär {ch['dT_ss']:.1f} K", delta_color="off")
+                m[4].metric("ΔT max", f"{ch['dT_max']:.1f} K", f"stationär {ch['dT_ss']:.1f} K", delta_color="off", delta_arrow="off")
                 st.caption(f"Kontrolle: I_RMS² x ESR x R_th,eff = {ch['I_rms']:.2f}² x {d.R_esr_cell_used:.4f} Ω x "
                            f"{d.module.R_th:.1f} K/W = {ch['I_rms'] ** 2 * d.R_esr_cell_used * d.module.R_th:.1f} K "
                            f"(Mittelwert), Maximum durch die Welligkeit {ch['dT_max']:.1f} K.")
                 ui.show_fig(pl.fig_cell_thermal_chain(ch, inp.req.dT_max_K), f"cell_thermal_chain_{cid}_{d.P_final}",
-                            plt_module=pl.plt)
+                            plt_module=pl.plt, fx_keys=["I_sc", "th_first", "R_th_eff", "esr_eol"])
             c1, c2 = st.columns(2)
             ui.show_fig(pl.fig_emudesign(d.iterations, inp.req.dT_max_K), f"emudesign_{cid}", container=c1,
-                        plt_module=pl.plt)
+                        plt_module=pl.plt, fx_keys=["W_swing", "P_C", "P_I", "th_first"])
             with c2:
                 st.markdown("**Als Endauslegung übernehmen**")
                 st.caption(f"{ui.short(cid)} mit P = {d.P_final}, S = {d.S} ({d.S * d.P_final} Zellen)")
@@ -1023,15 +1326,19 @@ def page_detail():
     row, det = evaluate_candidate(cell, sc, si["S"], si["U_C01max"], inp.req, o, db, thermal_override=override,
                                   P_min=int(pmin))
     c = st.columns(6)
-    c[0].metric("P/S", row["setup"])
-    c[1].metric("C Modul", f"{row['C_module_F']:.2f} F")
-    c[2].metric("ESR Modul", f"{row['ESR_module_mOhm']:.0f} mΩ")
-    c[3].metric("Kosten", ui.fmt(row["cost_EUR"], 0, "€"))
-    c[4].metric("Masse", ui.fmt(row["mass_kg"], 2, "kg"))
-    c[5].metric("ΔT max", ui.fmt(row["dT_max_K"], 1, "K"))
+    ui.metric(c[0], "P/S", row["setup"], row["P_driver"], key="P_driver",
+              calc=f"P_C = {row['P_C']}, P_I = {row['P_I']}, P_T = {row['P_T']}")
+    ui.metric(c[1], "C Modul", f"{row['C_module_F']:.2f} F", f"Reserve EOL {100 * row['C_reserve']:.0f} %", key="C_mod",
+              calc=f"{row['P']}/{row['S']} x {row['C_cell_used_F']:.2f} F")
+    ui.metric(c[2], "ESR Modul", f"{row['ESR_module_mOhm']:.0f} mΩ", key="C_mod",
+              calc=f"{row['S']}/{row['P']} x {row['ESR_cell_mOhm']:.1f} mΩ")
+    ui.metric(c[3], "Kosten", ui.fmt(row["cost_EUR"], 0, "€"), key="cost")
+    ui.metric(c[4], "Masse / Volumen", ui.fmt(row["mass_kg"], 2, "kg"), ui.fmt(row["volume_dm3"], 2, "dm³"), key="mass")
+    ui.metric(c[5], "ΔT max (Lumped / Netz)", ui.fmt(row["dT_max_K"], 1, "K"),
+              ui.fmt(row.get("dT_net_max_K", float("nan")), 1, "K Netzwerk"), key="th_first")
     st.code("\n".join(det.log))
     for w in det.warnings:
-        st.warning(w)
+        ui.warn(w)
     st.caption(f"Kapazität: {row['C_source']}  |  ESR: {row['ESR_source']}")
     c1, c2 = st.columns(2)
     if det.fit is not None:
@@ -1046,10 +1353,11 @@ def page_detail():
         lay = layout_for(cell, int(row["S"]), int(row["P"]), o, inp.req)
         if lay is not None:
             m_cells = row["n_cells"] * float(cell["mass_g"]) / 1000
-            ui.show_fig(pl.fig_pcb_layout(lay, ui.short(cid) + " " + row["setup"], m_cells, o.pcb_areal_mass_g_cm2),
+            ui.show_fig(pl.fig_pcb_layout(lay, ui.short(cid) + " " + row["setup"], m_cells, o.pcb_areal_mass_g_cm2,
+                                          extent=layout_extent(res)),
                         f"pcb_{ui.short(cid).replace(' ', '_')}_{row['setup'].replace('/', 'x')}", plt_module=pl.plt)
     if not row["feasible"]:
-        st.warning(row["status"])
+        ui.warn(row["status"])
     if st.button("Diese Zelle als Auswahl übernehmen", type="primary"):
         inp.selected[sk] = {"cell_id": cid}
         st.success("Übernommen.")
@@ -1109,12 +1417,54 @@ def page_export():
 
 PAGE_FUNCS = dict(start=page_start, profil=page_profil, split=page_split, spannung=page_spannung,
                   kapazitaet=page_kapazitaet, zellen=page_zellen, thermik=page_thermik, tradeoff=page_tradeoff,
-                  emulation=page_emulation, detail=page_detail, db=page_db, export=page_export)
-PAGE_FUNCS[page]()
+                  balancing=page_balancing, emulation=page_emulation, detail=page_detail, db=page_db,
+                  export=page_export)
 
-with status_slot.container():
-    stt = st.session_state.get("last_status", {})
-    if stt:
-        html = "".join(f"<div style='margin:2px 0'>{ui.pill(v)}<span class='small'>Schritt {k}</span></div>"
-                       for k, v in stt.items())
-        st.markdown(f"<div style='margin-top:.3rem'>{html}</div>", unsafe_allow_html=True)
+
+def _set_nav_from_top():
+    v = st.session_state.get("nav_top")
+    if v:
+        st.session_state["nav"] = v
+
+
+def missing_items(r) -> list:
+    """What is missing or needs a decision (shown red)."""
+    out = []
+    if not inp.req.I_C0max_confirmed:
+        out.append("Wandlerstrom I_C0max bestätigen (Seite 3)")
+    if r.profile is None:
+        out.append("Kein Lastprofil: Thermik und Emulation brauchen ein Profil (Seite 1)")
+    if r.skipped_cells:
+        out.append(f"{len(r.skipped_cells)} Zellen mit fehlenden Daten übersprungen (Datenbank)")
+    for sk, df in r.candidates.items():
+        n = int((df.thermal_status.str.startswith("übersprungen")).sum())
+        if n:
+            out.append(f"{SCENARIOS.get(sk, sk)}: Thermik für {n} Zellen übersprungen (R_th/C_th fehlt)")
+    if r.candidates and not inp.selected:
+        out.append("Noch keine Zelle gewählt (Seite 7)")
+    return out
+
+
+page = st.session_state.get("nav", "start")
+if page not in PAGE_FUNCS:
+    page = "start"
+_res0 = compute()
+_stt = st.session_state.get("last_status", {})
+st.session_state["nav_top"] = page
+st.segmented_control("Schritte", PAGE_KEYS, key="nav_top", on_change=_set_nav_from_top, label_visibility="collapsed",
+                     format_func=lambda k: f"{page_status(dict((p[0], p[2]) for p in PAGES)[k])}{SHORT[k]}")
+ui.alerts(_res0.warnings)
+with flow_slot.container():
+    clicked = flownav.flowchart(_stt, page, key="flownav_side", width="stretch")
+    st.markdown(flownav.legend_html(), unsafe_allow_html=True)
+if clicked and clicked != page:
+    st.session_state["nav"] = clicked
+    st.rerun()
+with missing_slot.container():
+    miss = missing_items(_res0)
+    if miss:
+        st.markdown("**Was fehlt**")
+        for m in miss:
+            st.markdown(f"<div style='color:#b71c1c;font-size:.85rem;margin:2px 0'>■ {m}</div>",
+                        unsafe_allow_html=True)
+PAGE_FUNCS[page]()

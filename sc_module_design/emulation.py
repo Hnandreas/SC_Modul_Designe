@@ -74,6 +74,7 @@ class EmulationConfig:
     eta_dch: float = 1.0                # converter efficiency SC -> bus (applied in every time step)
     eta_ch: float = 1.0                 # converter efficiency bus -> SC
     U_bus_V: float = 48.0               # DC bus voltage (for the bus current I_bus = P_bus / U_bus)
+    U_conv_min_V: Optional[float] = None  # minimum input voltage of the converter (terminal voltage U_C - R I)
     max_cycles: int = 200
     tol_U_V: float = 1e-3
     tol_T_K: float = 0.02
@@ -122,6 +123,7 @@ class CycleSummary:
     I_sc_rms_cell_A: float = 0.0
     U_term_min_V: float = 0.0
     t_power_limit_s: float = 0.0
+    t_Uconv_min_s: float = 0.0
 
 
 class HESSEmulator:
@@ -331,7 +333,9 @@ class HESSEmulator:
             E_conv_loss_J=st["E_conv"],
             E_swing_J=float(max(tr.E_sc.max(), E0) - min(tr.E_sc.min(), E0)),
             I_sc_rms_cell_A=float(np.sqrt(np.mean(tr.I_sc_rms ** 2))) / self.m.P,
-            U_term_min_V=float(tr.U_term.min()), t_power_limit_s=st["t_plim"])
+            U_term_min_V=float(tr.U_term.min()), t_power_limit_s=st["t_plim"],
+            t_Uconv_min_s=(float(np.sum(tr.U_term < self.cfg.U_conv_min_V)) * self.dt
+                           if self.cfg.U_conv_min_V else 0.0))
         self.history.append(s)
         return s, tr
 
