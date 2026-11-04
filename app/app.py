@@ -177,6 +177,33 @@ def selected_cell(scenario: str) -> str | None:
     return (inp.selected or {}).get(scenario, {}).get("cell_id")
 
 
+def chosen_cell(res, scenario: str, ids: list) -> tuple:
+    """Cell to show by default: selection of this module, else of the other module, else the recommendation."""
+    cid = selected_cell(scenario)
+    if cid in ids:
+        return cid, "gewählt in Schritt 7"
+    for sk_ in (inp.selected or {}):
+        other = selected_cell(sk_)
+        if other in ids:
+            return other, f"gewählt für {SCENARIOS.get(sk_, sk_)}"
+    df_ = res.candidates.get(scenario)
+    if df_ is not None:
+        f_ = df_[df_.feasible & df_.cell_id.isin(ids)]
+        if len(f_) and "score" in f_:
+            return f_.sort_values("score", ascending=False).iloc[0].cell_id, "Empfehlung (keine Auswahl)"
+    return (ids[0] if ids else None), "erste Zelle (keine Auswahl)"
+
+
+def _select_cell(sk: str, key: str, all_modules_key: str):
+    cid = st.session_state.get(key)
+    if not cid:
+        return
+    targets = list(inp.opt.scenarios) if st.session_state.get(all_modules_key, True) else [sk]
+    for t in targets:
+        prev = inp.selected.get(t) or {}
+        inp.selected[t] = {"cell_id": cid} if prev.get("cell_id") != cid else prev
+
+
 def plotly_layout(fig, height=420):
     fig.update_layout(height=height, margin=dict(l=10, r=10, t=10, b=10), font=PLOTLY_FONT,
                       legend=dict(orientation="h", y=-0.18), plot_bgcolor="white")
@@ -1071,17 +1098,24 @@ def page_tradeoff():
         c[1].metric("Günstigste", ui.short(pk["cell_id"]) if pk else "-")
         with c[2]:
             opts = list(feas.cell_id)
-            idx = opts.index(cur_sel) if cur_sel in opts else (opts.index(best) if best in opts else 0)
-            choice = st.selectbox("Gewählte Zelle", opts, index=idx, format_func=ui.short,
-                                  key=W.key(f"choice_{sk}_{cur_sel}"))
+            if cur_sel and cur_sel not in opts and cur_sel in set(df.cell_id):
+                opts = [cur_sel] + opts
+            idx = opts.index(cur_sel) if cur_sel in opts else None
+            kk = W.key(f"choice_{sk}")
+            ka = W.key(f"choice_all_{sk}")
+            st.selectbox("Gewählte Zelle (gilt sofort)", opts, index=idx, format_func=ui.short, key=kk,
+                         placeholder="Zelle wählen", on_change=_select_cell, args=(sk, kk, ka))
             b1, b2 = st.columns(2)
-            if b1.button("Auswahl übernehmen", type="primary", key=W.key(f"take_{sk}"), width="stretch"):
-                inp.selected[sk] = {"cell_id": choice}
-                st.rerun()
+            b1.checkbox("für alle Module", value=True, key=ka,
+                        help="Die Auswahl gilt für Modul 1 und Modul 2 (wie in der Diss eine Zelle für beide).")
             if cur_sel and b2.button("Auswahl entfernen", key=W.key(f"drop_{sk}"), width="stretch"):
                 inp.selected.pop(sk, None)
+                st.session_state.pop(kk, None)
                 st.rerun()
-            st.caption(f"Aktuell gewählt: **{ui.short(cur_sel) if cur_sel else 'keine'}**")
+            if cur_sel:
+                st.caption(f"Gewählt: **{ui.short(cur_sel)}**")
+            else:
+                ui.warn("Noch keine Zelle gewählt.")
         ui.table(feas, RANK_COLS, key=W.key(f"rank_{sk}"), fx_keys=["score", "cost", "mass", "P_loss", "reserve"])
         s, contrib = score(feas, base, o.reserve_cap)
         ranked = feas.assign(score=s).sort_values("score", ascending=False)
@@ -1199,16 +1233,24 @@ def page_emulation():
     if res.profile is None or not res.candidates:
         st.info("Für die Emulation werden ein Lastprofil und Kandidaten benötigt.")
         return
-    sk = st.selectbox("Szenario", list(res.candidates), index=len(res.candidates) - 1,
+    keys_ = list(res.candidates)
+    with_sel = [k for k in keys_ if selected_cell(k)]
+    sk = st.selectbox("Szenario", keys_, index=keys_.index(with_sel[-1]) if with_sel else len(keys_) - 1,
                       format_func=lambda s: SCENARIOS[s], key=W.key("emu_scen"))
-    df = res.candidates[sk][res.candidates[sk].feasible]
-    opts = list(df.cell_id)
-    main = selected_cell(sk) if selected_cell(sk) in opts else opts[0]
+    dfa = res.candidates[sk]
+    opts = list(dfa[dfa.feasible].cell_id)
+    sel = selected_cell(sk)
+    if sel and sel not in opts and sel in set(dfa.cell_id):
+        opts = [sel] + opts                      # keep the selection even if it is outside the specification
+        ui.warn(f"Die gewählte Zelle {ui.short(sel)} liegt außerhalb der Vorgabe ({dfa.set_index('cell_id').loc[sel].status}).")
+    main, src = chosen_cell(res, sk, opts)
+    if src != "gewählt in Schritt 7":
+        ui.warn(f"Für {SCENARIOS[sk]} ist in Schritt 7 keine Zelle gewählt. Verwendet: {ui.short(main)} ({src}).")
     with st.container(border=True):
         c = st.columns([1.3, 1.7])
         cells = c[0].multiselect("Zellen (die gewählte zuerst, weitere zum Vergleich)", opts, default=[main],
                                  format_func=ui.short, key=W.key(f"emu_cells_{sk}_{main}"))
-        c[1].caption(f"Gewählt in Schritt 7: **{ui.short(main)}**. Weitere Zellen nur zum Vergleich.")
+        c[1].caption(f"Verwendet: **{ui.short(main)}** ({src}). Weitere Zellen nur zum Vergleich.")
         c = st.columns(5)
         eta_d = c[0].number_input("η Entladen [%]", 50.0, 100.0, float(inp.req.eta_dch * 100), 0.5,
                                   key=W.key("emu_etad"))
