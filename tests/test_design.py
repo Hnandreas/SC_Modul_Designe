@@ -154,3 +154,95 @@ def test_emulation_energy_balance():
     assert last.dT_max > 0
     # battery + SC must cover the load in every bin
     assert np.allclose(tr.P_bat + tr.P_sc - tr.P_load, 0, atol=1e-6)
+
+
+# ---------------------------------------------------------------------- converter, current, thermal chain
+def test_converter_efficiency():
+    from sc_module_design.converter import bus_to_cell
+    p = np.array([100.0, -100.0, 0.0])
+    out = bus_to_cell(p, 0.9, 0.8)
+    assert out == pytest.approx([100 / 0.9, -80.0, 0.0])
+    assert bus_to_cell(p, 1.0, 1.0) == pytest.approx(p)
+
+
+def test_current_power_balance_with_esr_drop():
+    from sc_module_design.current import current_scalar
+    U, R, P = 40.0, 0.2, 1000.0
+    i, lim = current_scalar(P, U, R)
+    assert not lim
+    assert (U - R * i) * i == pytest.approx(P)               # P = U_term I_SC
+    assert i > P / U                                          # ESR drop increases the current
+    i_c, _ = current_scalar(-P, U, R)
+    assert (U - R * i_c) * i_c == pytest.approx(-P)
+    _, lim = current_scalar(U * U / (4 * R) * 1.01, U, R)    # beyond the power limit U^2/(4R)
+    assert lim
+
+
+def test_cell_loss_lowpass_squares_the_current():
+    from sc_module_design.thermal import cell_loss_lowpass
+    dt = 0.01
+    i = np.where(np.arange(100000) % 200 < 100, 3.0, -3.0)   # +-3 A square wave, RMS 3 A
+    ch = cell_loss_lowpass(i, dt, 0.024, 22.1, 19.7)
+    assert ch["I_rms"] == pytest.approx(3.0)
+    assert ch["P_v_mean"] == pytest.approx(9 * 0.024)
+    assert ch["dT_ss"] == pytest.approx(9 * 0.024 * 22.1)    # 4.77 K
+    assert ch["dT_max"] == pytest.approx(ch["dT_ss"], rel=0.02)
+
+
+@pytest.mark.skipif(not PRIVATE, reason="private robot-arm profile not available")
+def test_emulation_design_and_thermal_chain():
+    from sc_module_design.emudesign import emulation_design
+    r = run_design(load_preset("thesis_characterized"))
+    d = emulation_design(r, "profile", "VISHAY_HVR235_50F", check_eol=False)
+    assert d.feasible and d.P_final >= d.P_analytic
+    assert d.chain is not None and d.chain["dT_max"] <= r.inputs.req.dT_max_K
+    assert np.all(d.chain["p_v"] >= 0)
+
+
+# ---------------------------------------------------------------------- PCB layout
+def test_layout_reference_comparison():
+    """EDLC layout comparison N = 60 x 1, d = 24 mm, gap 0.5 mm: 358.2 cm^2 (square) vs 334.0 cm^2 (hex)."""
+    from sc_module_design.layout import pcb_layout
+    sq = pcb_layout(60, 1, 24, 40, "square", 0.5, 5, bands=10, connectors=())
+    hx = pcb_layout(60, 1, 24, 40, "hex", 0.5, 5, bands=10, connectors=())
+    assert sq.cell_area_mm2 / 100 == pytest.approx(358.2, abs=0.1)
+    assert hx.cell_area_mm2 / 100 == pytest.approx(334.0, abs=0.1)
+    assert 100 * (hx.cell_area_mm2 / sq.cell_area_mm2 - 1) == pytest.approx(-6.8, abs=0.05)
+
+
+@pytest.mark.parametrize("orientation", ["auto", "long", "wide"])
+@pytest.mark.parametrize("packing", ["hex", "square"])
+def test_layout_u_path_and_connector(orientation, packing):
+    from sc_module_design.layout import pcb_layout
+    lay = pcb_layout(23, 5, 18, 35, packing, 0.5, 5, orientation=orientation)
+    groups = {c[2] for c in lay.cells}
+    assert groups == set(range(23)) and len(lay.cells) == 115
+    # + and - next to each other at the front edge, inside the connector
+    con = lay.connectors[0]
+    for x, y in (lay.terminal_plus, lay.terminal_minus):
+        assert con["x"] <= x <= con["x"] + con["w"] and y <= con["h"]
+    # cells do not overlap each other or the connectors
+    pts = np.array([(c[0], c[1]) for c in lay.cells])
+    dist = np.sqrt(((pts[:, None] - pts[None]) ** 2).sum(-1)) + np.eye(len(pts)) * 1e9
+    assert dist.min() >= 18 - 1e-6
+    for x, y in pts:
+        cx = min(max(x, con["x"]), con["x"] + con["w"])
+        cy = min(max(y, con["y"]), con["y"] + con["h"])
+        assert math.hypot(x - cx, y - cy) >= 9 - 1e-6
+    assert 0 < pts[:, 0].min() - 9 and pts[:, 0].max() + 9 <= lay.width_mm
+    assert pts[:, 1].max() + 9 <= lay.depth_mm
+    if orientation == "long":
+        assert lay.depth_mm >= lay.width_mm
+    if orientation == "wide":
+        assert lay.width_mm >= lay.depth_mm
+
+
+def test_specification_limits_grey_out():
+    inp = load_preset("legged_robot_48V")
+    inp.req.max_volume_dm3 = 0.5
+    r = run_design(inp)
+    df = r.candidates["profile"]
+    bad = df[df.volume_dm3 > 0.5]
+    assert len(bad) and not bad.feasible.any()
+    assert bad.status.str.startswith("Vorgabe verletzt").all()
+    assert df[df.volume_dm3 <= 0.5].feasible.all()

@@ -166,7 +166,21 @@ def export_run(res, out_dir: Optional[str | Path] = None, figures: bool = True, 
                 "alignment") == "legacy_matlab"
             figs["energy_excursions"] = pl.fig_energy_excursions(res, "iecon" if legacy else "auto")
         if res.candidates:
-            figs["Modules_Cells"] = pl.fig_tradeoff(res)
+            figs["Modules_Cells"] = pl.fig_tradeoff(res, scenarios=tuple(res.candidates))
+            if res.inputs.opt.geometry == "pcb":
+                from .selection import layout_pair
+                for sk, sel in (res.inputs.selected or {}).items():
+                    df = res.candidates.get(sk)
+                    if df is None or sel.get("cell_id") not in set(df.cell_id):
+                        continue
+                    row = df[df.cell_id == sel["cell_id"]].iloc[0]
+                    P = int(sel.get("P") or row.P)
+                    cell = db.cell(row.cell_id)
+                    sq, hx = layout_pair(cell, int(row.S), P, res.inputs.opt, res.inputs.req)
+                    if sq is not None:
+                        m_cells = int(row.S) * P * float(cell["mass_g"]) / 1000
+                        figs[f"layout_{sk}"] = pl.fig_layout_compare(sq, hx, m_cells,
+                                                                      res.inputs.opt.pcb_areal_mass_g_cm2)
         for name, fig in figs.items():
             if fig is not None:
                 pl.save_fig(fig, fdir / name)

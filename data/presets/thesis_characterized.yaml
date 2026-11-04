@@ -3,7 +3,8 @@ description: >-
   Dissertation extension: same procedure, but characterized cell parameters where available.
   C_eq,E from C0 and k (90-20 % window, highest measured current), ESR from the recursive method M4
   (fallback M3, M2, M1, then datasheet) and thermal verification with R_th/C_th. Cells without own
-  thermal data use the database proxy (marked with a warning).
+  thermal data use R_th/C_th of the characterized 50 F cell scaled to their size (warning). Thermal check
+  for a packed module block without forced cooling and with end-of-life ESR (x 2). Selected: 50 F.
 profile:
   path: data/profiles/private/robot_arm_profile.npz
   scale: 1.0
@@ -18,6 +19,8 @@ split:
   params: {window_s: 20.0, alignment: legacy_matlab}
 braking: {enabled: true, mode: kinematic, mass_kg: 880.0, v_mps: 1.5, t_brake_s: 1.0}
 req:
+  eta_dch: 1.0
+  eta_ch: 1.0
   U_bus_V: 48.0
   U_C0max_V: 48.0
   P_max_mode: peak
@@ -38,9 +41,17 @@ opt:
   esr_source: measured
   esr_methods: [M4, M3, M2, M1]
   esr_current: highest
-  geometry: corrected
-  thermal_mode: proxy
+  geometry: pcb
+  packing: hex
+  thermal_mode: proxy_scaled
   thermal_current: energy_balance
   thermal_profile: periodic
+  thermal_coupling: packed_block
+  cell_spacing_mm: 0.5
+  pcb_orientation: auto
+  pcb_bands: 0
+  thermal_esr_factor: 2.0
+  weight_preset: robust
 selected:
-  profile_braking: {cell_id: VISHAY_HVR235_30F}
+  profile: {cell_id: VISHAY_HVR235_50F}
+  profile_braking: {cell_id: VISHAY_HVR235_50F}

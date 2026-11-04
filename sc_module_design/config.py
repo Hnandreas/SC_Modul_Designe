@@ -63,6 +63,15 @@ class Requirements:
     L_EOL: float = 0.7
     T_amb_C: float = 25.0                # ambient for the thermal check
     dT_max_K: float = 40.0
+    eta_dch: float = 1.0                 # interface converter efficiency, SC discharging (SC -> bus)
+    eta_ch: float = 1.0                  # interface converter efficiency, SC charging (bus -> SC)
+    # optional specification limits (None = no limit). Cells violating one are shown greyed out.
+    max_width_mm: Optional[float] = None     # PCB width (front edge)
+    max_depth_mm: Optional[float] = None     # PCB depth (front to back)
+    max_height_mm: Optional[float] = None    # cell length + PCB + clearance
+    max_volume_dm3: Optional[float] = None
+    max_mass_kg: Optional[float] = None
+    max_cost_EUR: Optional[float] = None
 
 
 @dataclass
@@ -81,16 +90,36 @@ class Options:
     esr_methods: list = field(default_factory=lambda: ["M4", "M3", "M2", "M1"])
     esr_current: object = "highest"
     # geometry / trade-off
-    geometry: str = "corrected"                    # corrected | legacy_iecon
-    packing_factor: float = 1.0                    # module volume = cell volume / packing_factor
+    geometry: str = "pcb"                          # pcb | corrected | legacy_iecon
+    packing_factor: float = 1.0                    # 'corrected': module volume = cell volume / packing_factor
+    packing: str = "hex"                           # PCB layout: hex | square
+    pcb_orientation: str = "auto"                  # auto | long | wide
+    pcb_group_shape: str = "auto"                  # auto | row | column | block
+    pcb_bands: int = 0                             # 0 = auto, else number of group columns (2 legs, U path)
+    pcb_margin_mm: float = 5.0
+    pcb_clearance_mm: float = 3.0                  # PCB thickness 1.6 mm + this clearance on top of the cell length
+    pcb_target_aspect: float = 2.0                 # target depth/width (long) or width/depth (wide)
+    pcb_areal_mass_g_cm2: float = 0.35             # FR4 1.6 mm with copper, added to the module mass
+    conn_power_w_mm: float = 25.0                  # power connector footprint (0 = none)
+    conn_power_d_mm: float = 15.0
+    conn_signal_w_mm: float = 0.0                  # balancing / sense connector footprint (0 = none)
+    conn_signal_d_mm: float = 0.0
     # thermal
-    thermal_mode: str = "available_only"           # skip | available_only | proxy
+    thermal_mode: str = "available_only"           # skip | available_only | proxy | proxy_scaled
     thermal_current: str = "energy_balance"        # energy_balance | conservative_umin
     thermal_profile: str = "periodic"              # periodic | single_pass
+    thermal_coupling: str = "single_cell"          # single_cell | packed_block | factor
+    thermal_coupling_factor: float = 1.0           # used for 'factor'
+    cell_spacing_mm: float = 0.5                   # gap between the cells on the PCB (and for 'packed_block')
+    thermal_esr_factor: float = 1.0                # 1 = new cell (BOL), 2 = end of life (ESR +100 %)
     thermal_dt_bin_s: float = 0.01
     P_limit: int = 200
-    # trade-off weights (normalised metrics, lower is better)
-    weights: dict = field(default_factory=lambda: {"cost": 1.0, "mass": 1.0, "volume": 1.0, "esr": 1.0})
+    # trade-off: weights of the criteria (see tradeoff.CRITERIA), 0 = ignored
+    weight_preset: str = "balanced"
+    weights: dict = field(default_factory=lambda: {
+        "cost": 1.0, "mass": 1.0, "volume": 1.0, "losses": 1.0, "thermal": 1.0, "cells": 1.0,
+        "reserve": 1.0, "data": 1.0})
+    reserve_cap: float = 0.3                       # capacity reserve above this gives no extra benefit
 
 
 @dataclass

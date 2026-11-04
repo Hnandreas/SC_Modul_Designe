@@ -15,12 +15,13 @@ import pandas as pd
 from . import equations as eq
 from .config import DesignInputs
 from .database import Database, get_database
+from .converter import bus_to_cell
 from .energy import Excursions, braking_energy, braking_power, energy_excursions
 from .paths import resolve
 from .profile import PowerProfile, bin_signal, load_profile, peak_analysis
 from .selection import ScenarioContext, evaluate_all, series_voltage
 from .splits import apply_split, get_split
-from .tradeoff import annotate, picks
+from .tradeoff import annotate, picks, preset_weights
 
 SCENARIOS = {
     "profile": "Module 1: load profile (W = E_DCH,max + E_CH,max)",
@@ -45,7 +46,8 @@ class DesignResult:
     stats: dict = field(default_factory=dict)
     peaks: Optional[dict] = None
     p_bat: Optional[np.ndarray] = None
-    p_sc: Optional[np.ndarray] = None
+    p_sc: Optional[np.ndarray] = None          # SC-side power (after converter efficiency), used for the design
+    p_sc_bus: Optional[np.ndarray] = None      # SC share of the load on the DC bus (output of the split)
     excursions: Optional[Excursions] = None
     load: dict = field(default_factory=dict)
     voltages: dict = field(default_factory=dict)
@@ -110,11 +112,13 @@ def run_design(inp: DesignInputs, db: Optional[Database] = None, profile: Option
             p_bat, p_sc = apply_split(inp.split.name, profile.t, profile.p, inp.split.params)
         else:
             p_bat, p_sc = split
-        res.p_bat, res.p_sc = p_bat, p_sc
-        ex = energy_excursions(p_sc, profile.dt, opt.energy_method)
+        res.p_bat, res.p_sc_bus = p_bat, p_sc
+        res.p_sc = bus_to_cell(p_sc, req.eta_dch, req.eta_ch) if (req.eta_dch != 1 or req.eta_ch != 1) else p_sc
+        ex = energy_excursions(res.p_sc, profile.dt, opt.energy_method)
         res.excursions = ex
         load.update(P_peak_W=res.stats["P_peak_W"], P_avg_W=res.stats["P_avg_W"], E_dch_J=ex.E_dch_J,
-                    E_ch_J=ex.E_ch_J, source=f"profile {profile.name} ({inp.split.name}, {opt.energy_method})")
+                    E_ch_J=ex.E_ch_J, source=f"profile {profile.name} ({inp.split.name}, {opt.energy_method}, "
+                                             f"eta_dch = {req.eta_dch:g}, eta_ch = {req.eta_ch:g})")
         for n in ex.notes:
             res.warnings.append(n)
     if use_manual:
@@ -128,17 +132,17 @@ def run_design(inp: DesignInputs, db: Optional[Database] = None, profile: Option
         load["source"] = "manual values" if profile is None else load.get("source", "") + " + manual override"
     load.setdefault("P_avg_W", float("nan"))
     if req.P_max_mode == "peak":
-        load["P_SC_max_W"] = load["P_peak_W"]
+        load["P_SC_max_W"] = load["P_peak_W"] / req.eta_dch
     elif req.P_max_mode == "peak_minus_avg":
-        load["P_SC_max_W"] = load["P_peak_W"] - load["P_avg_W"]
+        load["P_SC_max_W"] = (load["P_peak_W"] - load["P_avg_W"]) / req.eta_dch
     else:
-        load["P_SC_max_W"] = float(req.P_max_W)
+        load["P_SC_max_W"] = float(req.P_max_W) / req.eta_dch
     load["P_SC_tr_W"] = load["P_peak_W"] - load["P_avg_W"]
     br = inp.braking
     if br.enabled:
         E_b = br.E_J if (br.mode == "direct" and br.E_J) else braking_energy(br.mass_kg, br.v_mps)
         P_b = br.P_W if (br.mode == "direct" and br.P_W) else braking_power(E_b, br.t_brake_s)
-        load.update(E_brake_J=E_b, P_brake_W=P_b)
+        load.update(E_brake_J=E_b * req.eta_ch, P_brake_W=P_b * req.eta_ch, E_brake_bus_J=E_b)
     res.load = load
     s0.status = "done"
     s0.summary = (f"P_peak = {load['P_peak_W']:.1f} W, P_avg = {load['P_avg_W']:.1f} W, "
@@ -238,9 +242,10 @@ def run_design(inp: DesignInputs, db: Optional[Database] = None, profile: Option
         return res
     for key, sc in res.scenarios.items():
         df, det = evaluate_all(cells, sc, res.series_info, req, opt, db)
-        res.candidates[key] = annotate(df, opt.weights)
+        weights = preset_weights(opt.weight_preset) or opt.weights
+        res.candidates[key] = annotate(df, weights, opt.reserve_cap)
         res.details[key] = det
-    n_th = {k: int((~df.thermal_status.str.startswith("skipped")).sum()) for k, df in res.candidates.items()}
+    n_th = {k: int((~df.thermal_status.str.startswith("übersprungen")).sum()) for k, df in res.candidates.items()}
     n_feas = {k: int(df.feasible.sum()) for k, df in res.candidates.items()}
     s5.status = "done" if not skipped else "warning"
     s5.summary = "; ".join(f"{k}: {n_feas[k]}/{len(res.candidates[k])} feasible, thermal check for {n_th[k]}"
@@ -255,7 +260,7 @@ def run_design(inp: DesignInputs, db: Optional[Database] = None, profile: Option
         res.picks[key] = picks(df)
     s12.status = "done"
     s12.summary = "; ".join(
-        f"{k}: cost -> {p.get('min_cost', {}).get('cell_id', '-')}, mass -> {p.get('min_mass', {}).get('cell_id', '-')}"
+        f"{k}: score -> {p.get('best_score', {}).get('cell_id', '-')}, cost -> {p.get('min_cost', {}).get('cell_id', '-')}"
         for k, p in res.picks.items())
     if inp.selected:
         sel = [f"{k}: {v.get('cell_id')}" for k, v in inp.selected.items()]

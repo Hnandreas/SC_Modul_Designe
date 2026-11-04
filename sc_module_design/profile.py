@@ -102,7 +102,9 @@ def load_profile(path: str | Path, scale: float = 1.0, time_col: Optional[str] =
     dts = np.diff(t)
     uniform = np.allclose(dts, dts[0], rtol=1e-3, atol=1e-9)
     if resample_dt or not uniform:
-        dt = resample_dt or float(np.median(dts))
+        # non-uniform samples (e.g. digitised figures): linear interpolation on a 50 times finer grid,
+        # so that the peaks of the polyline are kept
+        dt = resample_dt or min(float(np.median(dts)) / 50, 0.005)
         tu = np.arange(t[0], t[-1] + dt / 2, dt)
         p = np.interp(tu, t, p)
         t = tu

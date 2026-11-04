@@ -1,0 +1,49 @@
+name: legged_robot_24V
+description: >-
+  Public quadruped power profile (LeggedRobotMPC2025, reconstructed from the published figure, 25 s,
+  mean 75.6 W, peak 916 W) with a 24 V bus. Split: centred moving average 3 s (as in the thesis figure),
+  no braking event. Interface converter current limit I_C0max = 2 P_max / U_bus, so U_C0min is about half
+  of U_C0max. Lifetime and thermal requirements as for the robot arm (65 °C, 40000 h, L_EOL 0.7, dT 40 K).
+  Cell parameters as in thesis_characterized.
+profile:
+  path: data/profiles/public/legged_robot_LeggedRobotMPC2025.csv
+  scale: 1.0
+split:
+  name: moving_average
+  params: {window_s: 3.0, alignment: centered}
+braking: {enabled: false}
+req:
+  eta_dch: 1.0
+  eta_ch: 1.0
+  U_bus_V: 24.0
+  U_C0max_V: 24.0
+  P_max_mode: peak
+  I_C0max_A: 80.0
+  T_cell_C: 65.0
+  t_life_h: 40000.0
+  L_EOL: 0.7
+  T_amb_C: 25.0
+  dT_max_K: 40.0
+opt:
+  energy_method: zero_crossing_exact
+  scenarios: [profile]
+  c_source: ceq_M1
+  cfit_range: "90-20"
+  cfit_current: highest
+  cfit_dataset: auto
+  esr_source: measured
+  esr_methods: [M4, M3, M2, M1]
+  esr_current: highest
+  geometry: pcb
+  packing: hex
+  pcb_orientation: auto
+  pcb_bands: 0
+  thermal_mode: proxy_scaled
+  thermal_current: energy_balance
+  thermal_profile: periodic
+  thermal_coupling: packed_block
+  cell_spacing_mm: 0.5
+  thermal_esr_factor: 2.0
+  weight_preset: robust
+selected:
+  profile: {cell_id: VISHAY_HVR235_50F}

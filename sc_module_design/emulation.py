@@ -1,25 +1,34 @@
 """HESS emulation with the load profile repeated endlessly (thermal simulation / cooling concept, step 14).
 
-Per bin (default 10 ms, mean and mean square of the full-resolution signals are kept):
-  battery  P_bat = p_bat_split + P_rech + P_overflow
-  SC       P_sc  = p_sc_split - P_rech  (limited by U I_C0max and by U_C0min / U_C0max)
-  P_rech   optional state-of-charge controller: K (E_target - E), limited to +-P_rech_max
-  SC energy  dE/dt = -(P_sc + I^2 R),  I = P_sc / U,  U from E (constant C or C(U) = C0 + kU per cell)
-  cell temperature  C_th dT/dt = R_cell I_cell^2 - T / R_th
+Power balance at the interface converter in every time step:
 
-``HESSEmulator.run_cycle()`` advances one profile period, ``run_until_steady()`` repeats until
-U and dT are periodic, ``stream()`` yields chunks forever (live view in the GUI).
+    P_bus = U_bus I_bus                         (SC share on the DC bus, e.g. 48 V)
+    P_SC  = P_bus / eta_dch  (discharge)        P_SC = P_bus eta_ch (charge)
+    P_SC  = U_SC I_SC  with  U_SC = U_C - R I_SC (terminal voltage = internal voltage minus ESR drop)
+    ->  I_SC = (U_C - sqrt(U_C^2 - 4 R P_SC)) / (2 R)        (see current.py)
+
+Per bin (default 10 ms, mean and mean square of the full-resolution power are kept):
+  battery    P_bat = p_bat_split + P_rech + P_overflow
+  SC         P_bus,SC = p_sc_split - P_rech, limited by the current limit, the power limit U_C^2/(4R)
+             and the voltage limits U_C0min / U_C0max (the rest is taken by the battery: overflow)
+  recharge   P_rech = K (E_target - E), limited to +-P_rech_max (optional energy management)
+  SC energy  dE/dt = -(P_SC + R i^2)           (terminal power + Joule loss in the ESR)
+  cell temperature  C_th dT/dt = R_cell i_cell^2 - dT / R_th
+
+``run_cycle()`` advances one profile period, ``run_until_steady()`` repeats until U and dT are
+periodic, ``stream()`` / ``_advance()`` continue forever (live view in the GUI).
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterator, Optional
 
 import numpy as np
 
 from . import equations as eq
-from .profile import Binned, bin_signal
+from .current import current_array
+from .profile import bin_signal
 
 
 @dataclass
@@ -58,10 +67,13 @@ class EmulationConfig:
     soc_target: str = "U_C0inM"         # U_C0inM | U_C0max
     K_soc_per_s: float = 0.05           # P_rech = K (E_target - E)
     P_rech_max_W: float = 300.0
-    eol: bool = False                   # end-of-life: C x L_EOL, R x esr_eol_factor
+    eol: bool = False                   # end of life: C x L_EOL, R x esr_eol_factor
     L_EOL: float = 0.7
     esr_eol_factor: float = 2.0
     T_amb_C: float = 25.0
+    eta_dch: float = 1.0                # converter efficiency SC -> bus (applied in every time step)
+    eta_ch: float = 1.0                 # converter efficiency bus -> SC
+    U_bus_V: float = 48.0               # DC bus voltage (for the bus current I_bus = P_bus / U_bus)
     max_cycles: int = 200
     tol_U_V: float = 1e-3
     tol_T_K: float = 0.02
@@ -72,12 +84,18 @@ class CycleTrace:
     t: np.ndarray
     P_load: np.ndarray
     P_bat: np.ndarray
-    P_sc: np.ndarray
+    P_sc: np.ndarray                # SC share on the bus side
     P_rech: np.ndarray
-    U_sc: np.ndarray
-    I_sc_rms: np.ndarray
+    U_sc: np.ndarray                # internal SC voltage U_C (open circuit)
+    I_sc_rms: np.ndarray            # RMS SC current per step
     dT: np.ndarray
     overflow: np.ndarray
+    P_sc_cell: np.ndarray           # power at the SC terminals
+    I_sc: np.ndarray                # SC current (mean per step), + = discharge
+    E_sc: np.ndarray                # stored energy at the end of each step
+    I_sc_peak: np.ndarray           # largest |I_SC| inside each step (full resolution)
+    U_term: np.ndarray              # terminal voltage U_C - R I
+    I_bus: np.ndarray               # bus-side current of the SC path, P_bus / U_bus
 
 
 @dataclass
@@ -99,6 +117,11 @@ class CycleSummary:
     t_at_Umin_s: float
     t_at_Umax_s: float
     t_current_limit_s: float
+    E_conv_loss_J: float = 0.0
+    E_swing_J: float = 0.0
+    I_sc_rms_cell_A: float = 0.0
+    U_term_min_V: float = 0.0
+    t_power_limit_s: float = 0.0
 
 
 class HESSEmulator:
@@ -116,6 +139,7 @@ class HESSEmulator:
         c_fac = self.cfg.L_EOL if self.cfg.eol else 1.0
         r_fac = self.cfg.esr_eol_factor if self.cfg.eol else 1.0
         self.R_mod = module.R_module * r_fac
+        self.R_cell_eff = module.R_cell_Ohm * r_fac
         self._setup_energy(c_fac)
         self.E = self.energy(module.U_init)
         target = module.U_init if self.cfg.soc_target == "U_C0inM" else module.U_max
@@ -159,7 +183,8 @@ class HESSEmulator:
         pl, pb = self.load.mean.tolist(), self.bat.mean.tolist()
         sm, sq = self.sc.mean.tolist(), self.sc.mean_sq.tolist()
         smax, smin = self.sc.vmax.tolist(), self.sc.vmin.tolist()
-        o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of = (np.empty(n_bins) for _ in range(9))
+        (o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of, o_pc, o_is, o_E, o_ip, o_ut,
+         o_ib) = (np.empty(n_bins) for _ in range(15))
         E, dT = self.E, self.dT
         Ksoc, Pr_max, Et = cfg.K_soc_per_s, cfg.P_rech_max_W, self.E_target
         Elo, Ehi = self.E_lo, self.E_hi
@@ -173,11 +198,27 @@ class HESSEmulator:
         voltage = self.voltage
         stats = self._stats
         soc = cfg.soc_control
-        t_lo = t_hi = t_ilim = E_loss = E_of = 0.0
+        ed, ec = cfg.eta_dch, cfg.eta_ch
+        Ubus = cfg.U_bus_V
+        t_lo = t_hi = t_ilim = t_plim = E_loss = E_of = E_conv = 0.0
         sqrt = math.sqrt
         k = self.pos
         n = self.n
         t_base = self.cycle * self.period
+        R2 = 2.0 * R
+        noR = R <= 1e-12
+
+        def cur(p, U):
+            """SC current for terminal power p at internal voltage U (ESR drop). Returns (i, limited)."""
+            if noR:
+                return p / U, False
+            if p >= 0:
+                d = U * U - 4.0 * R * p
+                if d < 0:
+                    return U / R2, True
+                return (U - sqrt(d)) / R2, False
+            return -(sqrt(U * U - 4.0 * R * p) - U) / R2, False
+
         for j in range(n_bins):
             U = voltage(E) if cu else sqrt(2.0 * E / C)
             p_rech = 0.0
@@ -188,33 +229,60 @@ class HESSEmulator:
                 elif p_rech < -Pr_max:
                     p_rech = -Pr_max
             smk = sm[k]
-            ps = smk - p_rech
-            plim = U * Imax
+            ps = smk - p_rech                       # SC share on the bus side
+            dis = ps > 0
+            pc = ps / ed if dis else ps * ec        # power at the SC terminals
+            i, plim = cur(pc, U)
+            limited = plim
+            if i > Imax:
+                i, limited = Imax, True
+            elif i < -Imax:
+                i, limited = -Imax, True
+            if plim:
+                t_plim += dt
             overflow = 0.0
-            if ps > plim:
-                overflow, ps = ps - plim, plim
-            elif ps < -plim:
-                overflow, ps = ps + plim, -plim
-            if smax[k] - p_rech > plim or smin[k] - p_rech < -plim:
-                t_ilim += dt
+            if limited:
+                if i == Imax or i == -Imax:
+                    t_ilim += dt
+                pc_new = (U - R * i) * i
+                bus = pc_new * ed if pc_new > 0 else pc_new / ec
+                overflow = ps - bus
+                ps, pc = bus, pc_new
+            # peak current inside the bin
+            hi = smax[k] - p_rech
+            lo = smin[k] - p_rech
+            ph = hi / ed if hi > 0 else hi * ec
+            plo = lo / ed if lo > 0 else lo * ec
+            ipk = max(abs(cur(ph, U)[0]), abs(cur(plo, U)[0]))
+            if ipk > Imax:
+                ipk = Imax
+                if not limited:
+                    t_ilim += dt
+            # mean square current inside the bin (RMS of the terminal power converted to current)
             msq = sq[k] - 2.0 * p_rech * smk + p_rech * p_rech
-            if msq < ps * ps:
-                msq = ps * ps
-            i2 = msq / (U * U)
+            msq = msq / (ed * ed) if dis else msq * ec * ec
+            prms = sqrt(msq) if msq > 0 else 0.0
+            irms = abs(cur(prms if pc >= 0 else -prms, U)[0])
+            if irms > Imax:
+                irms = Imax
+            i2 = irms * irms
+            if i2 < i * i:
+                i2 = i * i
             loss = R * i2
-            E_new = E - (ps + loss) * dt
+            E_new = E - (pc + loss) * dt
             if E_new < Elo:
-                overflow += (Elo - E_new) / dt
+                overflow += (Elo - E_new) / dt * (ed if dis else 1.0)
                 E_new = Elo
                 t_lo += dt
             elif E_new > Ehi:
-                overflow -= (E_new - Ehi) / dt
+                overflow -= (E_new - Ehi) / dt / (ec if not dis else 1.0)
                 E_new = Ehi
                 t_hi += dt
             E = E_new
             if th:
                 dT = a_th * dT + (1.0 - a_th) * rth * (loss / npc)
             E_loss += loss * dt
+            E_conv += abs(pc - ps) * dt
             E_of += (overflow if overflow > 0 else -overflow) * dt
             o_t[j] = t_base + k * dt
             o_pl[j] = pl[k]
@@ -225,22 +293,26 @@ class HESSEmulator:
             o_i[j] = sqrt(i2)
             o_dT[j] = dT
             o_of[j] = overflow
+            o_pc[j] = pc
+            o_is[j] = i
+            o_E[j] = E
+            o_ip[j] = ipk
+            o_ut[j] = U - R * i
+            o_ib[j] = ps / Ubus
             k += 1
             if k >= n:
                 k = 0
                 self.cycle += 1
                 t_base = self.cycle * self.period
         self.pos = k
-        stats["t_lo"] += t_lo
-        stats["t_hi"] += t_hi
-        stats["t_ilim"] += t_ilim
-        stats["E_loss"] += E_loss
-        stats["E_of"] += E_of
+        for key, v in (("t_lo", t_lo), ("t_hi", t_hi), ("t_ilim", t_ilim), ("t_plim", t_plim), ("E_loss", E_loss),
+                       ("E_of", E_of), ("E_conv", E_conv)):
+            stats[key] += v
         self.E, self.dT = E, dT
-        return CycleTrace(o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of)
+        return CycleTrace(o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of, o_pc, o_is, o_E, o_ip, o_ut, o_ib)
 
     def _reset_stats(self) -> None:
-        self._stats = dict(t_lo=0.0, t_hi=0.0, t_ilim=0.0, E_loss=0.0, E_of=0.0)
+        self._stats = dict(t_lo=0.0, t_hi=0.0, t_ilim=0.0, t_plim=0.0, E_loss=0.0, E_of=0.0, E_conv=0.0)
 
     def run_cycle(self) -> tuple[CycleSummary, CycleTrace]:
         """Advance exactly one profile period (from the current position)."""
@@ -248,16 +320,38 @@ class HESSEmulator:
         U0, dT0, cyc = self.voltage(self.E), self.dT, self.cycle
         tr = self._advance(self.n)
         st = self._stats
+        E0 = self.energy(U0)
         s = CycleSummary(
             cycle=cyc, U_start=U0, U_end=self.voltage(self.E), U_min=float(tr.U_sc.min()),
             U_max=float(tr.U_sc.max()), dT_start=dT0, dT_max=float(tr.dT.max()),
             P_bat_max_W=float(tr.P_bat.max()), P_bat_min_W=float(tr.P_bat.min()),
             P_bat_rms_W=float(np.sqrt(np.mean(tr.P_bat ** 2))), I_sc_rms_A=float(np.sqrt(np.mean(tr.I_sc_rms ** 2))),
-            I_sc_peak_A=float(max(np.max(self.sc.vmax / tr.U_sc), -np.min(self.sc.vmin / tr.U_sc))),
-            E_loss_J=st["E_loss"], E_overflow_J=st["E_of"], t_at_Umin_s=st["t_lo"], t_at_Umax_s=st["t_hi"],
-            t_current_limit_s=st["t_ilim"])
+            I_sc_peak_A=float(np.max(tr.I_sc_peak)), E_loss_J=st["E_loss"], E_overflow_J=st["E_of"],
+            t_at_Umin_s=st["t_lo"], t_at_Umax_s=st["t_hi"], t_current_limit_s=st["t_ilim"],
+            E_conv_loss_J=st["E_conv"],
+            E_swing_J=float(max(tr.E_sc.max(), E0) - min(tr.E_sc.min(), E0)),
+            I_sc_rms_cell_A=float(np.sqrt(np.mean(tr.I_sc_rms ** 2))) / self.m.P,
+            U_term_min_V=float(tr.U_term.min()), t_power_limit_s=st["t_plim"])
         self.history.append(s)
         return s, tr
+
+    def cell_current_full(self, trace: CycleTrace, p_load: np.ndarray, p_bat: np.ndarray,
+                          dt_full: float) -> np.ndarray:
+        """Cell current at full time resolution for one periodic cycle.
+
+        P_bus,SC(t) - P_rech -> P_SC(t) with the converter efficiency -> I_SC(t) from P_SC = (U_C - R I) I with
+        U_C of the step (power balance U_bus I_bus = U_SC I_SC), limited to I_max, divided by P.
+        """
+        k = max(1, int(round(self.dt / dt_full)))
+        n = self.n * k
+        p_sc_bus = (p_load - p_bat)[:n]
+        rech = np.repeat(trace.P_rech, k)[: len(p_sc_bus)]
+        U = np.repeat(trace.U_sc, k)[: len(p_sc_bus)]
+        ps = p_sc_bus - rech
+        pc = np.where(ps > 0, ps / self.cfg.eta_dch, ps * self.cfg.eta_ch)
+        i_mod, _ = current_array(pc, U, self.R_mod)
+        i_mod = np.clip(i_mod, -self.m.I_max_A, self.m.I_max_A)
+        return i_mod / self.m.P
 
     def run_until_steady(self, max_cycles: Optional[int] = None, accelerate_thermal: bool = True
                          ) -> tuple[list[CycleSummary], CycleTrace]:
@@ -271,7 +365,6 @@ class HESSEmulator:
             if u_ok and t_ok:
                 break
             if u_ok and self.thermal and accelerate_thermal and len(self.history) >= 2:
-                # voltage periodic -> losses periodic -> jump to the thermal periodic steady state
                 aN = math.exp(-self.period / (self.m.R_th * self.m.C_th))
                 F = self.dT - aN * s.dT_start
                 self.dT = F / (1.0 - aN)

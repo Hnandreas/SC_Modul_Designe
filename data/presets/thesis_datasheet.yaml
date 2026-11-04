@@ -37,4 +37,5 @@ opt:
   thermal_current: energy_balance
   thermal_profile: periodic
 selected:
-  profile_braking: {cell_id: VISHAY_HVR235_30F}
+  profile: {cell_id: VISHAY_HVR235_50F}
+  profile_braking: {cell_id: VISHAY_HVR235_50F}

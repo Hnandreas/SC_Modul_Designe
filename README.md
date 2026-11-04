@@ -45,19 +45,42 @@ res.steps["2"].summary                     # Status und Ergebnis jedes Flussdiag
 
 ## GUI
 
-| Tab | Inhalt |
-|---|---|
-| Übersicht | Flussdiagramm mit Status je Schritt (grün gerechnet, gelb Warnung, grau übersprungen), Kennwerte, Warnungen |
-| 1 Anforderungen & Profil | Profil wählen/hochladen, Skalierung, Zeitfenster, manuelle Lastwerte, Filter (Moving Average, Peak-Shaver, Tiefpass, Butterworth, Rate-Limiter, eigener Ausdruck, Plugins), Bremsenergie, Peak-Statistik, FFT, Energieexkursionen, **Filtervergleich** |
-| 2 Spannungen & Lebensdauer | U_Bus, U_C0max, Lebensdauer-Derating (Arrhenius), S, U_C0N, U_C0min aus P_SC,max / I_C0max oder fest, U_C0inM, Abbildungen wie in der Diss |
-| 3 Kapazität | L_EOL, Szenarien (Module 1: Profil, Module 2: mit Bremsenergie), C_req |
-| 4 Zellauswahl & Trade-off | Kapazitätsquelle (Datenblatt / C_eq,E / C_N), ESR-Quelle, Volumenformel, Thermik-Modus, Tabelle aller Kandidaten (P_C, P_I, P_T, Modulwerte), Picks, Pareto, Score, Abbildung wie IECON, Vergleich mit der IECON-Tabelle, LaTeX-Tabelle |
-| 5 Zelldetail | eine Zelle anklicken und mit eigenen Optionen rechnen (Fenster, Messstrom, Datensatz, ESR, Thermik inkl. eigener R_th/C_th, P mindestens), Rechenweg, C(U)-Plot, Temperaturverlauf |
-| 6 Emulation | gewähltes Modul im HESS: Profil endlos wiederholt bis periodischer Beharrungszustand, SOC-Regler für das Nachladen, Spannungs- und Stromgrenzen, ESR-Verluste, Zelltemperatur, BOL/EOL, **Live-Ansicht als Endlosschleife** |
-| 7 Datenbank | alle Tabellen ansehen und bearbeiten (speichert CSV, baut SQLite neu), SQL-Abfragen, Quellen |
-| 8 Export | Ordner unter `outputs/` mit inputs.yaml, summary.json/.md, Kandidaten-CSV, `tab_results.tex`, Abbildungen (PDF/SVG/PNG im Diss-Stil) |
+Geführter Ablauf, eine Seite je Schritt des Flussdiagramms (Seitenleiste links, Status je Schritt):
 
-Presets (Sidebar) laden und speichern komplette Eingaben als YAML in `data/presets/`.
+| Seite | Inhalt |
+|---|---|
+| Start und Überblick | Flussdiagramm mit Status, gewähltes Modul, Kennwerte, Presets laden/speichern |
+| 1 Lastprofil | Profil wählen/hochladen, Skalierung, Zeitfenster, manuelle Werte, Peak-Statistik, FFT |
+| 2 Leistungsaufteilung | Filter (Moving Average, Peak-Shaver, Tiefpass, Butterworth, Rate-Limiter, eigener Ausdruck, Plugins), Filtervergleich, Wandler-Wirkungsgrad Laden/Entladen, Bremsereignis |
+| 3 Spannungen und Lebensdauer | U_Bus, U_C0max, Derating, S, U_C0min, U_C0inM |
+| 4 Kapazität | L_EOL, Szenarien (Module 1: Profil, Module 2: mit Bremsenergie), C_req |
+| 5 Zellauswahl | Kapazitäts- und ESR-Quelle, **Leiterplatte** (Packung, Ausrichtung, Stecker), **Vorgaben** (Bauraum, Masse, Kosten), Tabelle aller Kandidaten, Layout-Vergleich quadratisch/hexagonal |
+| 6 Thermik | Thermik-Modus, Wärmeabfuhr, ESR am Lebensende, Aufschlüsselung ΔT, ΔT je Kandidat |
+| 7 Bewertung und Auswahl | Gewichtung (ausgewogen, Kosten, kompakt, robust, eigene), Rangliste, Abbildung wie IECON mit Moduldichte, interaktiver Vergleich, Auswahl übernehmen |
+| 8 Emulation und Auslegung | Profil endlos im HESS, Strom aus der Leistungsbilanz mit ESR-Abfall, Zelltemperatur aus i² ESR und thermischem Tiefpass, P erhöhen bis alles eingehalten ist, Live-Ansicht |
+| Zelldetail, Datenbank, Export | eine Zelle mit eigenen Optionen, Tabellen bearbeiten, Export (YAML, CSV, LaTeX, Abbildungen PDF/SVG/PNG) |
+
+Konfigurationen außerhalb der Vorgaben (oder der thermischen bzw. P-Grenze) bleiben in den Tabellen sichtbar
+(Spalte Status) und sind in allen Abbildungen grau.
+
+### Emulationsbasierte Auslegung
+
+Je Zeitschritt: Leistung am SC aus der Busleistung mit Wirkungsgrad (Entladen P_Bus / η_dch, Laden P_Bus η_ch),
+Strom aus der Leistungsbilanz P = U_SC I_SC mit U_SC = U_C - R_ESR I_SC, also
+I_SC = (U_C - sqrt(U_C² - 4 R_ESR P)) / (2 R_ESR) mit der Leistungsgrenze P ≤ U_C² / (4 R_ESR).
+Aus dem emulierten Profil: Energiehub, C_req,emu, Spitzen- und RMS-Strom, Zelltemperatur aus
+p_v = i_Zelle² R_ESR und dem thermischen Tiefpass erster Ordnung. P wird erhöht, bis weder U_C0min/U_C0max noch
+die Strom- oder Leistungsgrenze erreicht werden und ΔT eingehalten ist. Standard ist die Prüfung am Lebensende
+(C x L_EOL, ESR x 2).
+
+### Leiterplatten-Layout
+
+Die Zellen stehen auf einer Leiterplatte, P Zellen bilden eine Gruppe, S Gruppen in Serie. Der Serienpfad läuft
+als U: vorne in der Mitte los, in der linken Hälfte nach hinten, in der rechten Hälfte zurück nach vorne. Plus
+und Minus liegen vorne nebeneinander. Freie Gruppenplätze bleiben vorne in der Mitte, dort sitzen die Stecker
+(bei Bedarf um 90° gedreht), damit die Platine nicht größer wird. Packung quadratisch oder hexagonal versetzt,
+Ausrichtung auto, eher lang oder eher breit, Gruppenform automatisch. Masse = Zellen + Leiterplatte,
+Volumen = Platine x (Zelllänge + Leiterplatte + Abstand), daraus die Moduldichte.
 
 ## Flussdiagramm und Code
 
@@ -72,7 +95,8 @@ Presets (Sidebar) laden und speichern komplette Eingaben als YAML in `data/prese
 | 7 bis 10 Thermik | app_thermal_rms_limit, app_parallel_thermal, app_transient_thermal_model | `thermal.py`, `selection.py` |
 | 12 Trade-off | Tab. results, Fig. modules Cells | `tradeoff.py`, `plotting.fig_tradeoff`, `report.latex_results_table` |
 | 13 Balancing | (Schnittstelle) | `balancing.py` |
-| Thermische Simulation | Endlosschleife | `emulation.py` |
+| Thermische Simulation | Endlosschleife, emulationsbasierte Auslegung | `emulation.py`, `emudesign.py`, `current.py` |
+| Mechanik | Leiterplatten-Layout | `layout.py` |
 
 Ablaufsteuerung mit Status je Schritt: `pipeline.run_design`.
 
@@ -85,7 +109,8 @@ Ablaufsteuerung mit Status je Schritt: `pipeline.run_design`.
 - **Modulstrom für die Thermik**: `energy_balance` (P_SC(t)/U(t), U aus Energiebilanz ab U_C0inM) oder `conservative_umin` (P_SC(t)/U_C0min).
 - **Thermisches Profil**: `periodic` (Profil endlos, periodischer Beharrungszustand) oder `single_pass` (ein Durchlauf ab Gleichgewicht, wie Anhang A01).
 - **Energieauswertung**: `zero_crossing_legacy` (MATLAB-Algorithmus IECON), `zero_crossing_exact`, `cumulative_swing` (Spannweite der kumulierten SC-Energie, erfasst aufeinanderfolgende Pulse).
-- **Volumen**: `corrected` oder `legacy_iecon`.
+- **Volumen**: `pcb` (Leiterplatten-Layout, Standard), `corrected` oder `legacy_iecon`.
+- **Vorgaben**: maximale Breite, Tiefe, Höhe, Volumen, Masse, Kosten (`req.max_*`), jeweils optional.
 
 ## Erweitern
 
@@ -98,7 +123,8 @@ Ablaufsteuerung mit Status je Schritt: `pipeline.run_design`.
 
 - Alles wird committet außer `data/profiles/private/` (eigene Messprofile, Uploads), `outputs/`, `Old/` und der automatisch gebauten `sc_database.sqlite`.
 - Das Roboterarm-Profil liegt als `data/profiles/private/robot_arm_profile.npz` (149 s, 0.1 ms, in W) nur lokal. Fehlt es, rechnen die Presets mit den veröffentlichten Werten weiter.
-- Öffentliches Vergleichsprofil: `data/profiles/public/legged_robot_LeggedRobotMPC2025.csv`.
+- Öffentliches Vergleichsprofil: `data/profiles/public/legged_robot_LeggedRobotMPC2025.csv`, mit den Presets
+  `legged_robot_24V` und `legged_robot_48V` (Moving Average 3 s, I_C0max = 2 P_max / U_Bus).
 - Quellen jeder Tabelle: `data/database/SOURCES.md`.
 
 ## Hinweise zur Reproduktion von IECON 2023
@@ -117,11 +143,13 @@ S = 23, C_req = 4.165 F / 5.183 F sowie alle P/S-Konfigurationen, Massen, ESR-We
 ## Struktur
 
 ```
-app/                 Streamlit-GUI (app.py, widgets.py)
-sc_module_design/    Rechenkern (config, database, profile, splits, energy, equations,
-                     selection, thermal, tradeoff, emulation, pipeline, plotting, report, cli)
+app/                 Streamlit-GUI (app.py, ui.py, widgets.py)
+sc_module_design/    Rechenkern (config, database, profile, splits, energy, equations, selection,
+                     thermal, current, converter, layout, tradeoff, emulation, emudesign,
+                     pipeline, plotting, style, report, cli)
 data/database/       CSV-Datenbank + SOURCES.md (SQLite wird automatisch gebaut)
-data/presets/        YAML-Presets (iecon2023_legacy, thesis_datasheet, thesis_characterized, ...)
+data/presets/        YAML-Presets (iecon2023_legacy, thesis_datasheet, thesis_characterized,
+                     legged_robot_24V, legged_robot_48V)
 data/profiles/       public/ (in git), private/ (nicht in git)
 plugins/             eigene Filter (automatisch geladen)
 tests/               pytest
