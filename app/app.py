@@ -1295,8 +1295,8 @@ def page_emulation():
                                     "I_rms_module_A": "I_Modul RMS [A]", "I_rms_cell_A": "I_Zelle RMS [A]",
                                     "dT_max_K": "ΔT Kriterium [K]", "dT_block_max_K": "ΔT Block [K]",
                                     "dT_net_max_K": "ΔT Netzwerk heißeste [K]", "t_at_Umin_s": "t an U_min [s]",
-                                    "t_at_Umax_s": "t an U_max [s]", "t_current_limit_s": "t an I-Grenze [s]",
-                                    "E_overflow_J": "Überlauf [J]", "E_loss_esr_J": "ESR-Verlust [J]",
+                                    "t_at_Umax_s": "t an U_max [s]", "t_current_limit_s": "t an I_C0max (Batterie) [s]",
+                                    "E_overflow_J": "Batterie übernimmt [J]", "E_loss_esr_J": "ESR-Verlust [J]",
                                     "E_loss_conv_J": "Wandlerverlust [J]", "cycles": "Zyklen", "ok": "ok",
                                     "reason": "Begründung"})
             st.dataframe(it.round(2), hide_index=True, width="stretch")

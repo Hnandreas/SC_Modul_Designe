@@ -11,6 +11,8 @@ voltage limits, cell temperature) and the requirements are re-derived from the e
     dT_max    from the emulated cell losses (R_th,eff, C_th)
 
 P is increased until no voltage limit is reached, P >= P_C,emu, P_I,emu and dT_max <= dT_max,limit.
+The converter current limit I_C0max is hard: above it (and above the power limit U_C^2/(4R)) the battery delivers
+the rest; this is reported (time, energy) but does not increase P.
 The check runs at end of life by default (C x L_EOL, ESR x factor), the condition C_req is sized for.
 """
 from __future__ import annotations
@@ -172,8 +174,8 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             reasons.append(f"P < P_C,emu = {P_C_emu}")
         if P < P_I_emu:
             reasons.append(f"P < P_I,emu = {P_I_emu}")
-        if last.t_power_limit_s > 0:
-            reasons.append(f"Leistungsgrenze U_C^2/(4R) {last.t_power_limit_s:.2f} s erreicht")
+        # current limit I_C0max (hard) and power limit U_C^2/(4R): the SC delivers what it can, the battery the
+        # rest (overflow). Reported, but not a reason to increase P.
         if last.t_Uconv_min_s > 0:
             reasons.append(f"Klemmenspannung < U_Wandler,min = {cfg.U_conv_min_V:g} V für {last.t_Uconv_min_s:.2f} s")
         if dTm == dTm and dTm > req.dT_max_K:

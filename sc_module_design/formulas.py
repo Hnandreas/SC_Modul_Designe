@@ -186,8 +186,10 @@ _f("I_sc", "SC-Strom aus der Leistungsbilanz mit ESR-Abfall",
    r"P_\mathrm{Bus}=U_\mathrm{Bus}I_\mathrm{Bus}=U_\mathrm{SC}I_\mathrm{SC},\quad U_\mathrm{SC}=U_C-R I_\mathrm{SC}"
    r"\;\Rightarrow\;I_\mathrm{SC}=\frac{U_C-\sqrt{U_C^2-4RP}}{2R}",
    "P = (U_C - R I) I, also I = (U_C - sqrt(U_C² - 4RP)) / (2R)", ANDY_CHAT, "Leistungsbilanz am Wandler")
-_f("P_limit", "Leistungsgrenze", r"P\le\frac{U_C^2}{4R}", "P_max = U_C² / (4R) (Anpassung, halbe Spannung am ESR)",
-   PHYS)
+_f("P_limit", "Strom- und Leistungsgrenze", r"|I_\mathrm{SC}|\le I_\mathrm{C0max},\quad P\le\frac{U_C^2}{4R},"
+   r"\quad P_\mathrm{Bat}=P_\mathrm{Last}-P_\mathrm{SC,geliefert}",
+   "I_C0max ist hart, P_max = U_C²/(4R) folgt aus P = (U_C - R I) I. Darüber liefert die Batterie den Rest; "
+   "kein Grund, P zu erhöhen", ANDY_CHAT)
 _f("U_term", "Klemmenspannung", r"U_\mathrm{Klemme}=U_C-R_\mathrm{Modul}I_\mathrm{SC},\quad "
    r"R_\mathrm{Modul}=\frac{S}{P}ESR_\mathrm{Zelle}\;(\times2\ \text{am Lebensende})",
    "U_Klemme = U_C - R_Modul I_SC, R_Modul = S/P ESR_Zelle (x 2 am Lebensende)", PHYS)
