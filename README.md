@@ -55,9 +55,9 @@ Geführter Ablauf, eine Seite je Schritt des Flussdiagramms (Seitenleiste links,
 | 3 Spannungen und Wandlerstrom | U_Bus, U_C0max, Derating, S, U_C0min über r_Q, Wandlerstrom-Empfehlung mit Bestätigung, U_C0inM |
 | 4 Kapazität | L_EOL, Szenarien (Module 1: Profil, Module 2: mit Bremsenergie), C_req |
 | 5 Zellauswahl und Layout | Kapazitäts- und ESR-Quelle, **Leiterplatte** (Packung, Ausrichtung, Stecker), Tabelle aller Kandidaten (P-Treiber, Reserve am Lebensende und neu), „Was passt in den Bauraum?“, Layout-Vergleich quadratisch/hexagonal im gemeinsamen Maßstab |
-| 6 Thermik | Thermik-Modus, Wärmeabfuhr, ESR am Lebensende, Aufschlüsselung ΔT, ΔT je Kandidat, Netzwerkmodell (Wärmebild, Aufheizen, Modellvergleich, Messvergleich, Nachbarschichten), Quellen |
-| 7 Bewertung und Auswahl | Gewichtung (ausgewogen, Kosten, kompakt, robust, eigene), Rangliste, Abbildung wie IECON mit Moduldichte, interaktiver Vergleich, Auswahl übernehmen |
-| 8 Emulation und Auslegung | Profil endlos im HESS, Strom aus der Leistungsbilanz mit ESR-Abfall, Zelltemperatur aus i² ESR und thermischem Tiefpass, P erhöhen bis alles eingehalten ist, Live-Ansicht |
+| 6 Thermik | Gemeinsame Annahmen, dann getrennt: A Einzelzelle (Diss A01, gemessen), B Blockmodell (Lehrbuch, für SC-Module nicht validiert, FEM empfohlen), C Netzwerk (eigener Ansatz, nicht validiert, FEM empfohlen) mit Wärmebild und Aufheizen, Modellvergleich und Messvergleich, ideale Anordnung mit Nachbarschichten |
+| 7 Bewertung und Auswahl | Gewichtung (ausgewogen, Kosten, kompakt, robust, eigene), Rangliste, 2x2-Abbildung wie IECON mit wählbaren Größen (Kosten, Modulvolumen, Platinenfläche, Moduldichte, Masse oder Abweichung zu einer Referenz in %), interaktiver Vergleich, Auswahl übernehmen |
+| 8 Emulation und Auslegung | Profil endlos im HESS, Strom aus der Leistungsbilanz mit ESR-Abfall, Abbildung mit Spannungen (Bus, U_C, Klemme), Busströmen (Last, Batterie, SC) und SC-Strömen (Modul, Bus), Busspannung nominal oder konservativ, Thermik schaltbar und mit demselben Modell wie Seite 6 (Netzwerk, heißeste Zelle), P erhöhen bis alles eingehalten ist, Live-Ansicht |
 | Zelldetail, Datenbank, Export | eine Zelle mit eigenen Optionen, Tabellen bearbeiten, Export (YAML, CSV, LaTeX, Abbildungen PDF/SVG/PNG) |
 
 Konfigurationen außerhalb der Vorgaben (oder der thermischen bzw. P-Grenze) bleiben in den Tabellen sichtbar
@@ -95,6 +95,14 @@ Aus dem emulierten Profil: Energiehub, C_req,emu, Spitzen- und RMS-Strom, Zellte
 p_v = i_Zelle² R_ESR und dem thermischen Tiefpass erster Ordnung. P wird erhöht, bis weder U_C0min/U_C0max noch
 die Strom- oder Leistungsgrenze erreicht werden und ΔT eingehalten ist. Standard ist die Prüfung am Lebensende
 (C x L_EOL, ESR x 2).
+
+### ESR-Verluste in der Energieauslegung
+
+Entladen braucht E_DCH plus die I² R-Verluste. Weil R vom Modul abhängt, wird je Kandidat der Verlustanteil
+über die Entladeabschnitte im Beharrungszustand (Spannung um U_C0inM, Strom aus der Leistungsbilanz mit
+ESR-Abfall, ESR wie in der Thermik) bestimmt: E_V,DCH = (Σ I² R / Σ P) E_DCH,max. C_req und P_C werden damit
+erhöht (Spalten "Verluste Entladen", "C_req inkl. Verluste", "P_C ohne Verluste"). Schalter auf Seite 4; die
+Presets iecon2023_legacy und thesis_datasheet rechnen wie im Original ohne Verluste.
 
 ### Leiterplatten-Layout
 

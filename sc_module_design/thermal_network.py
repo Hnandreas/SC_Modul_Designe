@@ -217,8 +217,9 @@ def steady_state(g: Grid, p: NetworkParams, P_cell: float, tol: float = 1e-9, it
 
 
 def transient(g: Grid, p: NetworkParams, P_cell, t_end_s: float = 7200.0, n_points: int = 300,
-              T0_C: Optional[float] = None) -> tuple[np.ndarray, np.ndarray]:
-    """Heating from T0 (default ambient). P_cell: constant [W] or callable P(t) [W]. Returns (t, T[n_t, n])."""
+              T0_C=None) -> tuple[np.ndarray, np.ndarray]:
+    """Heating from T0 (scalar or per cell, default ambient). P_cell: constant [W] or callable P(t) [W].
+    Returns (t, T[n_t, n])."""
     M, b_amb = _matrices(g, p)
     Pf: Callable = P_cell if callable(P_cell) else (lambda t: P_cell)
     C = p.C_th
@@ -231,7 +232,7 @@ def transient(g: Grid, p: NetworkParams, P_cell, t_end_s: float = 7200.0, n_poin
         _, dq = _rad(T, p)
         return (-(M + diags(dq)) / C).toarray() if g.n <= 400 else -(M + diags(dq)) / C
 
-    T0 = np.full(g.n, p.T_inf_C if T0_C is None else T0_C, float)
+    T0 = np.broadcast_to(np.asarray(p.T_inf_C if T0_C is None else T0_C, float), (g.n,)).copy()
     te = np.linspace(0, t_end_s, n_points)
     sol = solve_ivp(f, (0, t_end_s), T0, method="BDF", t_eval=te, jac=jac, rtol=1e-6, atol=1e-6)
     return sol.t, sol.y.T
@@ -263,3 +264,29 @@ def layer_study(arrangement: str, p: NetworkParams, P_cell: float, n_max: int = 
 
 def n_cells(arrangement: str, n: int) -> int:
     return 1 + (2 if arrangement == "square" else 3) * n * (n + 1)
+
+
+def periodic_response(g: Grid, p: NetworkParams, t: np.ndarray, p_cell: np.ndarray, bin_s: float = 1.0,
+                      cycles: int = 2) -> dict:
+    """Network driven by the loss profile p_cell(t) of one period (all cells equal), periodic state.
+
+    Start from the stationary solution of the mean loss, run `cycles` periods, return the last one.
+    """
+    period = float(t[-1] - t[0]) + float(t[1] - t[0])
+    nb = max(1, int(round(period / bin_s)))
+    edges = np.linspace(0, len(p_cell), nb + 1).astype(int)
+    pb = np.array([p_cell[a:b].mean() for a, b in zip(edges[:-1], edges[1:])])
+    tb = (np.arange(nb) + 0.5) * period / nb
+    ss = steady_state(g, p, float(np.mean(p_cell)))
+
+    def Pf(tt):
+        return float(np.interp(tt % period, tb, pb, period=period))
+
+    T0 = ss.T
+    for _ in range(max(1, cycles)):
+        tt, T = transient(g, p, Pf, t_end_s=period, n_points=max(50, nb), T0_C=T0)
+        T0 = T[-1]
+    hot = int(np.argmax(T.max(0)))
+    return dict(t=tt, T=T, steady=ss, centre=g.centre, hot=hot, outer=g.outer,
+                dT_max=float(T.max() - p.T_inf_C), dT_centre_max=float(T[:, g.centre].max() - p.T_inf_C),
+                dT_outer_mean=float(T[:, g.outer].mean() - p.T_inf_C), P_mean=float(np.mean(p_cell)))

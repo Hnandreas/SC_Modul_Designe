@@ -137,17 +137,24 @@ def show_fig(fig, key: str, width_cm: Optional[float] = None, container=None, pl
 COLUMNS = {
     "cell_id": ("Zelle", None, None),
     "setup": ("P/S", None, "P parallele Stränge / S Zellen in Serie"),
-    "P_C": ("P_C", "%d", "P_C = ceil(S C_req / C_Zelle) (Diss)"),
+    "P_C": ("P_C", "%d", "P_C = ceil(S C_req / C_Zelle) (Diss), C_req inklusive ESR-Verluste beim Entladen"),
     "P_I": ("P_I", "%d", "P_I = ceil(I_C0max / I_Zelle,max) (Diss)"),
     "P_T": ("P_T", "%d", "P_T = ceil(I_Modul,RMS / I_Zelle,RMS,max), I_Zelle,RMS,max = sqrt(ΔT_max/(ESR R_th,eff)) "
                          "(Diss A01)"),
     "P_driver": ("P bestimmt durch", None, "Welcher Term P = max(P_C, P_I, P_T, ...) festlegt"),
+    "P_C_no_loss": ("P_C ohne Verluste", "%d", "P_C ohne ESR-Verluste beim Entladen"),
+    "E_loss_dch_J": ("Verluste Entladen [J]", "%.0f", "E_V,DCH = (Σ I² R / Σ P) über Entladeabschnitte x E_DCH,max, "
+                                                      "Beharrungszustand bei U_C0inM"),
+    "C_req_loss_F": ("C_req inkl. Verluste [F]", "%.3f", "2 (W_used + E_V,DCH) / (L_EOL (U_C0max² - U_C0min²))"),
+    "I_peak_Umin_A": ("I Spitze bei U_C0min [A]", "%.1f", "inkl. ESR-Abfall: (U - sqrt(U² - 4RP))/(2R); leer = "
+                                                         "Leistungsgrenze U²/(4R) überschritten"),
+    "pcb_area_cm2": ("Platinenfläche [cm²]", "%.0f", "Breite x Tiefe der Leiterplatte"),
     "n_cells": ("Zellen", "%d", "n = S P"),
     "C_cell_used_F": ("C Zelle [F]", "%.2f", "Datenblatt oder C_eq,E = C0 + (2k/3)(u2³-u1³)/(u2²-u1²) (Diss A02)"),
     "ESR_cell_mOhm": ("ESR Zelle [mΩ]", "%.1f", "Datenblatt oder eigene Messung (M4, M3, M2, M1)"),
     "C_module_F": ("C Modul [F]", "%.2f", "C_Modul = P/S C_Zelle"),
     "C_reserve": ("Reserve EOL [%]", "percent",
-                  "Reserve am Lebensende = C_Modul L_EOL / C_benötigt - 1 = C_Modul / C_req - 1. Sehr große Werte, "
+                  "Reserve am Lebensende = C_Modul / C_req - 1 (C_req inkl. Verluste). Sehr große Werte, "
                   "wenn P durch Strom oder Thermik bestimmt ist (Spalte P bestimmt durch)."),
     "C_reserve_BOL": ("Reserve neu [%]", "percent", "Notiz: Neuzustand C_Modul / C_benötigt - 1"),
     "ESR_module_mOhm": ("ESR Modul [mΩ]", "%.0f", "R_Modul = S/P ESR_Zelle"),

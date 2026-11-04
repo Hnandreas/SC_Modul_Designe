@@ -344,3 +344,32 @@ def test_converter_min_voltage_in_emulation():
     s, tr = em.run_cycle()
     assert s.t_Uconv_min_s > 0
     assert s.t_Uconv_min_s == pytest.approx(np.sum(tr.U_term < 39.0) * em.dt)
+
+
+# ---------------------------------------------------------------------- ESR losses, emulation thermal alignment
+@pytest.mark.skipif(not PRIVATE, reason="private robot-arm profile not available")
+def test_discharge_losses_raise_c_req():
+    inp = load_preset("thesis_characterized")
+    r1 = run_design(inp)
+    inp.opt.include_esr_losses = False
+    r0 = run_design(inp)
+    a = r1.candidates["profile_braking"].set_index("cell_id")
+    b = r0.candidates["profile_braking"].set_index("cell_id")
+    assert (a.E_loss_dch_J > 0).all()
+    assert (a.C_req_loss_F > r1.scenarios["profile_braking"].C_req).all()
+    assert (a.P_C >= b.P_C).all()
+    assert b.E_loss_dch_J.isna().all()
+
+
+@pytest.mark.skipif(not PRIVATE, reason="private robot-arm profile not available")
+def test_emulation_uses_same_thermal_network():
+    from sc_module_design.emudesign import emulation_design
+    r = run_design(load_preset("thesis_characterized"))
+    row = r.candidates["profile_braking"].set_index("cell_id").loc["VISHAY_HVR235_50F"]
+    d = emulation_design(r, "profile_braking", "VISHAY_HVR235_50F")
+    it0 = d.iterations[0]
+    assert it0.P == row.P
+    # same model, same P: network result of the emulation within 10 % of the thermal page (current differs slightly)
+    assert it0.dT_net_max_K == pytest.approx(row.dT_net_max_K, rel=0.1)
+    assert it0.dT_block_max_K == pytest.approx(row.dT_max_K, rel=0.1)
+    assert d.iterations[-1].dT_max_K <= r.inputs.req.dT_max_K

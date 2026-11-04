@@ -211,18 +211,34 @@ def fig_energy_excursions(res, windows: str | tuple = "auto", half_width: float 
 GREY_OUT = "#d4d4d4"
 
 
+TRADEOFF_QUANTITIES = {
+    "cost_EUR": ("Module cost [Euro]", "[Euro]"),
+    "volume_dm3": ("Module volume [dm$^3$]", "[dm$^3$]"),
+    "pcb_area_cm2": ("PCB area [cm$^2$]", "[cm$^2$]"),
+    "density_kg_dm3": ("Module density [kg/dm$^3$]", "[kg/dm$^3$]"),
+    "mass_kg": ("Module mass [kg]", "[kg]"),
+    "rel_volume_dm3": ("Volume vs. reference [%]", "[%]"),
+    "rel_pcb_area_cm2": ("PCB area vs. reference [%]", "[%]"),
+    "rel_density_kg_dm3": ("Density vs. reference [%]", "[%]"),
+    "rel_mass_kg": ("Mass vs. reference [%]", "[%]"),
+    "rel_cost_EUR": ("Cost vs. reference [%]", "[%]"),
+}
+
+
 def fig_tradeoff(res, scenarios=("profile", "profile_braking"), cmap: str = "jet", y_top: str = "cost_EUR",
                  y_bottom: str = "density_kg_dm3", size_top: str = "density_kg_dm3",
                  size_bottom: str = "cost_EUR", titles: Optional[dict] = None,
-                 highlight: Optional[dict] = None, show_infeasible: bool = True) -> Figure:
+                 highlight: Optional[dict] = None, show_infeasible: bool = True,
+                 cands: Optional[dict] = None) -> Figure:
     """IECON-style overview (Modules_Cells). Ball size in the foreground, colour = module ESR.
 
     Configurations that violate the specification (or the thermal / P limit) are drawn greyed out.
     With geometry 'pcb' the density is the module density (cells + PCB in the PCB box), else the cell density.
     """
-    scen = [s for s in scenarios if s in res.candidates]
+    cands = cands or res.candidates
+    scen = [s for s in scenarios if s in cands]
     titles = titles or {"profile": "Module 1", "profile_braking": "Module 2"}
-    alls = [res.candidates[s] for s in scen]
+    alls = [cands[s] for s in scen]
     dfs = [d[d.feasible] for d in alls]
     bad = [d[~d.feasible] for d in alls]
     ok_esr = np.concatenate([d.ESR_module_mOhm.to_numpy() for d in dfs]) if any(len(d) for d in dfs) else \
@@ -230,10 +246,11 @@ def fig_tradeoff(res, scenarios=("profile", "profile_braking"), cmap: str = "jet
     norm = Normalize(np.nanmin(ok_esr), np.nanmax(ok_esr))
     module_geo = getattr(res.inputs.opt, "geometry", "pcb") == "pcb"
     dens_lab = "Module density [kg/dm$^3$]" if module_geo else "Cell density [kg/dm$^3$]"
-    units = {"cost_EUR": "[Euro]", "density_kg_dm3": "[kg/dm$^3$]", "mass_kg": "[kg]", "volume_dm3": "[dm$^3$]",
-             "E_density_Wh_dm3": "[Wh/dm$^3$]"}
-    ylab = {"cost_EUR": "Module cost [Euro]", "density_kg_dm3": dens_lab, "mass_kg": "Module mass [kg]",
-            "volume_dm3": "Module volume [dm$^3$]", "E_density_Wh_dm3": "Module energy density [Wh/dm$^3$]"}
+    units = {k: v[1] for k, v in TRADEOFF_QUANTITIES.items()}
+    units["E_density_Wh_dm3"] = "[Wh/dm$^3$]"
+    ylab = {k: v[0] for k, v in TRADEOFF_QUANTITIES.items()}
+    ylab["density_kg_dm3"] = dens_lab
+    ylab["E_density_Wh_dm3"] = "Module energy density [Wh/dm$^3$]"
 
     def rng(col):
         src = alls if show_infeasible else dfs
@@ -272,6 +289,8 @@ def fig_tradeoff(res, scenarios=("profile", "profile_braking"), cmap: str = "jet
                 r = d[d.cell_id == cid]
                 if not r.empty:
                     ax.scatter(r.c_nom_F, r[ycol], s=150, facecolors="none", edgecolors="k", lw=1.0, zorder=6)
+            if ycol.startswith("rel_"):
+                ax.axhline(0, color="k", lw=0.8, ls="--", zorder=1)
             if i == 0:
                 ax.text(0.5, 1.03, titles.get(s, s), transform=ax.transAxes, ha="center", va="bottom")
                 ax.tick_params(labelbottom=False)
@@ -286,7 +305,7 @@ def fig_tradeoff(res, scenarios=("profile", "profile_braking"), cmap: str = "jet
         lax.axis("off")
         lax.scatter([0.15, 0.15, 0.15], [0.1, 0.5, 0.9], s=[18, 53, 88], c=["k", "none", "k"], edgecolors="k",
                     lw=0.5, zorder=5, clip_on=False)
-        fmt = "{:.0f}" if smax >= 100 else "{:.2f}"
+        fmt = "{:.0f}" if max(abs(smax), abs(smin)) >= 100 or scol.startswith("rel_") else "{:.2f}"
         lax.text(0.55, 0.9, fmt.format(smax), va="center")
         lax.text(0.55, 0.1, fmt.format(smin), va="center")
         lax.text(1.4, 0.5, units.get(scol, scol), rotation=90, va="center", ha="center")
@@ -415,40 +434,61 @@ def fig_dT_candidates(df, dT_max: float) -> Figure:
 
 # ---------------------------------------------------------------------- emulation
 def fig_emulated_profile(trace, module, sc=None, t_window: Optional[tuple] = None, i_limit: Optional[float] = None,
-                         u_conv_min: Optional[float] = None) -> Figure:
-    """Emulated supercapacitor profile over one periodic cycle: power, current, voltage, temperature."""
+                         u_conv_min: Optional[float] = None, u_bus: Optional[float] = None,
+                         u_bus_used: Optional[float] = None, thermal: bool = True, net: Optional[dict] = None
+                         ) -> Figure:
+    """Emulated HESS over one periodic cycle.
+
+    (a) voltages: bus/battery voltage, SC internal voltage U_C and terminal voltage U_C - R I
+    (b) bus currents: load, battery and SC on the bus side (P / U_bus)
+    (c) SC currents: module current I_SC and bus-side current I_SC,bus
+    (d) optional: cell temperature rise (thermal network if available, else block model)
+    """
     t = trace.t - trace.t[0]
     m = np.ones_like(t, bool) if t_window is None else (t >= t_window[0]) & (t <= t_window[1])
-    has_dT = trace.dT is not None and np.any(trace.dT[m] != 0)
+    ub = u_bus_used or u_bus or 48.0
+    has_dT = thermal and ((net is not None) or (trace.dT is not None and np.any(trace.dT[m] != 0)))
     n = 4 if has_dT else 3
     fig, axes = _stack(n, W2, 3.3)
     ax = axes[0]
-    ax.plot(t[m], trace.P_load[m], color=GREY, lw=0.6, label="Load")
-    ax.plot(t[m], trace.P_bat[m], color=UIBK_ORANGE, lw=LW, label="Battery")
-    ax.plot(t[m], trace.P_sc[m], color=UIBK_BLUE, lw=0.8, label="Supercapacitor (bus side)")
-    ax.set_ylabel("Power [W]")
-    ax = axes[1]
-    ax.plot(t[m], trace.I_sc[m], color=UIBK_BLUE, lw=0.8, label="SC current $I_\\mathrm{SC}$")
-    ax.plot(t[m], trace.I_bus[m], color=UIBK_ORANGE, lw=0.7, label="Bus current $I_\\mathrm{bus}$")
-    if i_limit:
-        ax.axhline(i_limit, color="k", ls="--", lw=0.8, label="Current limit")
-        ax.axhline(-i_limit, color="k", ls="--", lw=0.8)
-    ax.set_ylabel("SC current [A]")
-    ax = axes[2]
-    ax.plot(t[m], trace.U_sc[m], color=UIBK_BLUE, label="Internal voltage $U_C$")
-    ax.plot(t[m], trace.U_term[m], color=PINK, lw=0.6, label="Terminal voltage $U_C - R I$")
+    if u_bus:
+        ax.axhline(u_bus, color=UIBK_ORANGE, lw=LW, label="Bus / battery $U_\\mathrm{Bus}$")
+    if u_bus_used and u_bus and abs(u_bus_used - u_bus) > 1e-9:
+        ax.axhline(u_bus_used, color=UIBK_ORANGE, ls=":", lw=1.0, label="$U_\\mathrm{Bus,min}$ (conservative)")
+    ax.plot(t[m], trace.U_sc[m], color=UIBK_BLUE, label="SC internal $U_C$")
+    ax.plot(t[m], trace.U_term[m], color=PINK, lw=0.6, label="SC terminal $U_C - R I$")
     ax.axhline(module.U_min, color="k", ls="--", lw=0.8, label="$U_\\mathrm{C0min}$, $U_\\mathrm{C0max}$")
     ax.axhline(module.U_max, color="k", ls="--", lw=0.8)
     if u_conv_min:
-        ax.axhline(u_conv_min, color=MAGENTA, ls="-.", lw=0.9, label="Converter min. input voltage")
-    if sc is not None:
-        ax.axhline(sc.U_inM, color=DARK_GREY, ls=":", lw=0.9, label="$U_\\mathrm{C0inM}$")
+        ax.axhline(u_conv_min, color=MAGENTA, ls="-.", lw=0.9, label="Converter min. input")
     ax.set_ylabel("Voltage [V]")
+    ax = axes[1]
+    ax.plot(t[m], trace.P_load[m] / ub, color=GREY, lw=0.6, label="Load $I_\\mathrm{Last}$")
+    ax.plot(t[m], trace.P_bat[m] / ub, color=UIBK_ORANGE, lw=LW, label="Battery $I_\\mathrm{Bat}$")
+    ax.plot(t[m], trace.P_sc[m] / ub, color=UIBK_BLUE, lw=0.8, label="SC bus side $I_\\mathrm{SC,Bus}$")
+    ax.set_ylabel("Bus current [A]")
+    ax = axes[2]
+    ax.plot(t[m], trace.I_sc[m], color=UIBK_BLUE, lw=0.8, label="SC module $I_\\mathrm{SC}$")
+    ax.plot(t[m], trace.P_sc[m] / ub, color=UIBK_ORANGE, lw=0.7, label="SC bus side $I_\\mathrm{SC,Bus}$")
+    if i_limit:
+        ax.axhline(i_limit, color="k", ls="--", lw=0.8, label="Current limit $I_\\mathrm{C0max}$")
+        ax.axhline(-i_limit, color="k", ls="--", lw=0.8)
+    ax.set_ylabel("SC current [A]")
     if has_dT:
         ax = axes[3]
-        ax.plot(t[m], trace.dT[m], color=MAGENTA, label="Cell temperature rise")
+        if net is not None:
+            T = net["T"]
+            T_inf = float(net["steady"].params.T_inf_C)
+            tn = net["t"] - net["t"][0]
+            tn = tn * (t[-1] / tn[-1]) if tn[-1] > 0 else tn
+            ax.plot(tn, T[:, net["hot"]] - T_inf, color=MAGENTA, label="Hottest cell (network)")
+            ax.plot(tn, T[:, net["outer"]].mean(1) - T_inf, color=UIBK_BLUE, label="Outer cells (network)")
+            top = float(T.max() - T_inf)
+        else:
+            ax.plot(t[m], trace.dT[m], color=MAGENTA, label="Cell temperature rise (block)")
+            top = float(np.max(trace.dT[m]))
         ax.set_ylabel("$\\Delta T$ [K]")
-        ax.set_ylim(0, float(np.max(trace.dT[m])) * 1.15)
+        ax.set_ylim(0, top * 1.15 if top > 0 else 1)
     axes[-1].set_xlabel("Time [s]")
     axes[0].set_xlim(t[m][0], t[m][-1])
     for ax in axes:

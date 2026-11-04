@@ -10,6 +10,7 @@ import pandas as pd
 
 from . import equations as eq
 from .config import Options, Requirements
+from .current import current_array
 from .database import Database, _isnan
 from .profile import Binned
 from .layout import pcb_layout
@@ -334,10 +335,37 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
     det.esr_row = r_row
 
     P_C = eq.p_capacitance(S, sc.C_req, C_cell)
+    P_C0 = P_C
     P_I = eq.p_current(sc.I_C0max, float(cell["i_max_A"]))
     P = max(P_C, P_I, int(P_min))
     det.log.append(f"Schritt 6: P_C = ceil({S} x {sc.C_req:.3f} F / {C_cell:.2f} F) = {P_C}, "
                    f"P_I = ceil({sc.I_C0max:g} A / {cell['i_max_A']:g} A) = {P_I}  ->  p = {P}")
+    # ESR losses during the discharge (steady-state current trajectory), added to the energy requirement
+    E_loss_dch = np.nan
+    C_req_loss = sc.C_req
+    loss_ratio = np.nan
+    if opt.include_esr_losses and sc.psc is not None:
+        R_loss_e = R_cell * opt.thermal_esr_factor
+        dch = sc.psc.mean > 0
+        p_dch = float(np.sum(sc.psc.mean[dch]))
+        U_ss = np.full(int(dch.sum()), sc.U_inM)          # steady state: voltage around U_C0inM (recharged)
+        prms = np.sqrt(sc.psc.mean_sq[dch])
+        for _ in range(10):
+            R_m = eq.module_esr(P, S, R_loss_e)
+            i_m, _l1 = current_array(sc.psc.mean[dch], U_ss, R_m)
+            i_r, _l2 = current_array(prms, U_ss, R_m)
+            loss_ratio = float(np.sum(np.maximum(i_m ** 2, i_r ** 2)) * R_m) / p_dch if p_dch > 0 else 0.0
+            E_loss_dch = loss_ratio * sc.E_dch_J
+            C_req_loss = eq.c_required(sc.W_used_J + E_loss_dch, sc.U_max, sc.U_min, req.L_EOL)
+            P_C_new = eq.p_capacitance(S, C_req_loss, C_cell)
+            if P_C_new <= P:
+                P_C = max(P_C, P_C_new)
+                break
+            P_C = P_C_new
+            P = max(P, P_C)
+        det.log.append(f"Schritt 6 (Verluste): E_Verlust,DCH = {100 * loss_ratio:.2f} % x {sc.E_dch_J:.1f} J = "
+                       f"{E_loss_dch:.1f} J (I² R über die Entladeabschnitte bei U_C0inM, Beharrungszustand, R = S/P ESR x "
+                       f"{opt.thermal_esr_factor:g}); C_req inkl. Verluste = {C_req_loss:.3f} F -> P_C = {P_C}, p = {P}")
 
     th = thermal_override if thermal_override else resolve_thermal(cell, thermal_mode, db)
     det.thermal = th
@@ -454,13 +482,26 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
     if E_use_eol + 1e-6 < sc.W_used_J:
         det.warnings.append("Nutzbare Energie am Lebensende kleiner als gefordert.")
     lay = layout_for(cell, S, P, opt, req) if opt.geometry == "pcb" else None
+    # converter peak current at U_C0min including the ESR drop: P = (U - R I) I
+    R_pk = R_mod * opt.thermal_esr_factor
+    p_pk = sc.psc.vmax.max() if sc.psc is not None else sc.U_min * sc.I_C0max
+    disc = sc.U_min ** 2 - 4 * R_pk * p_pk
+    i_peak_umin = (sc.U_min - math.sqrt(disc)) / (2 * R_pk) if disc >= 0 and R_pk > 0 else np.nan
+    if not i_peak_umin == i_peak_umin:
+        det.warnings.append(f"Bei U_C0min = {sc.U_min:.1f} V ist P_SC,max = {p_pk:.0f} W über der Leistungsgrenze "
+                            f"U²/(4R) = {sc.U_min ** 2 / (4 * R_pk):.0f} W (R_Modul = {R_pk * 1000:.0f} mΩ).")
+    elif i_peak_umin > sc.I_C0max + 1e-9:
+        det.warnings.append(f"Spitzenstrom bei U_C0min inkl. ESR-Abfall {i_peak_umin:.1f} A > I_C0max = "
+                            f"{sc.I_C0max:g} A.")
     row = dict(
         cell_id=cell["cell_id"], manufacturer=cell.get("manufacturer"), c_nom_F=float(cell["c_nom_F"]),
         S=S, P=P, P_C=P_C, P_I=P_I, P_T=P_T, setup=f"{P}/{S}", n_cells=S * P,
         u_cell_max_life_V=u_cell_max_life, C_cell_used_F=C_cell, C_source=c_note,
         ESR_cell_mOhm=R_cell * 1000, ESR_source=r_note,
-        C_module_F=C_mod, C_reserve=C_mod / sc.C_req - 1 if sc.C_req else np.nan,
-        C_reserve_BOL=C_mod / (sc.C_req * req.L_EOL) - 1 if sc.C_req else np.nan,
+        C_module_F=C_mod, C_reserve=C_mod / C_req_loss - 1 if C_req_loss else np.nan,
+        C_reserve_BOL=C_mod / (C_req_loss * req.L_EOL) - 1 if C_req_loss else np.nan,
+        E_loss_dch_J=E_loss_dch, C_req_loss_F=C_req_loss, P_C_no_loss=P_C0,
+        I_peak_Umin_A=i_peak_umin, pcb_area_cm2=(lay.area_mm2 / 100 if lay is not None else np.nan),
         P_driver=p_driver(P, P_C, P_I, P_T, int(P_min), P_loop, P_net),
         ESR_module_mOhm=R_mod * 1000, I_module_max_A=P * float(cell["i_max_A"]),
         mass_kg=mass, volume_dm3=vol, density_kg_dm3=dens, cost_EUR=cost,

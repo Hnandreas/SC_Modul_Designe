@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 ANDY_DISS = "Andy, Dissertation"
 ANDY_MEAS = "Andy, eigene Messung"
-ANDY_SPEC = "Andy, Spezifikation Netzwerkmodell"
+ANDY_SPEC = "Andy, eigener Ansatz (Netzwerkmodell), nicht validiert, FEM empfohlen"
 ANDY_CHAT = "Andy, Vorgabe im Gespräch"
 DATASHEET = "Datenblatt"
 CLAUDE = "Annahme Claude"
@@ -98,6 +98,18 @@ _f("C_eq", "Energieäquivalente Kapazität",
    r"C_\mathrm{eq,E}=C_0+\frac{2k}{3}\frac{u_2^3-u_1^3}{u_2^2-u_1^2}",
    "C_eq,E = C0 + (2k/3)(u2³ - u1³)/(u2² - u1²), u = Zellspannungen bei U_C0min/S und U_C0max/S", ANDY_DISS,
    "Diss Anhang A02, C0/k aus eigener Charakterisierung")
+_f("E_loss", "ESR-Verluste beim Entladen (Beharrungszustand)",
+   r"E_\mathrm{V,DCH}=\frac{\sum_{P_\mathrm{SC}>0}I^2R_\mathrm{Modul}}{\sum_{P_\mathrm{SC}>0}P_\mathrm{SC}}\,"
+   r"E_\mathrm{DCH,max},\quad C_\mathrm{req,V}=\frac{2\left(W_\mathrm{used}+E_\mathrm{V,DCH}\right)}"
+   r"{L_\mathrm{EOL}\left(U_\mathrm{C0max}^2-U_\mathrm{C0min}^2\right)}",
+   "Verlustanteil I² R / P über die Entladeabschnitte bei U_C0inM (Beharrungszustand, Strom aus der "
+   "Leistungsbilanz mit ESR-Abfall), mal E_DCH,max; C_req wird damit erhöht, P_C neu bestimmt",
+   ANDY_CHAT, "Verluste beim Entladen gehören zur Energieauslegung")
+_f("I_peak", "Spitzenstrom bei U_C0min inklusive ESR-Abfall",
+   r"I_\mathrm{Spitze}=\frac{U_\mathrm{C0min}-\sqrt{U_\mathrm{C0min}^2-4R_\mathrm{Modul}P_\mathrm{SC,max}}}"
+   r"{2R_\mathrm{Modul}},\quad P_\mathrm{SC,max}\le\frac{U_\mathrm{C0min}^2}{4R_\mathrm{Modul}}",
+   "Strom, den der Wandler bei U_C0min wirklich zieht (Klemmenspannung U - R I); leer = Leistungsgrenze überschritten",
+   PHYS)
 _f("P_C", "Parallele Stränge aus der Kapazität", r"P_C=\left\lceil\frac{S\,C_\mathrm{req}}{C_\mathrm{Zelle}}\right\rceil",
    "P_C = ceil(S C_req / C_Zelle)", ANDY_DISS, "Diss Gl. parallel_capacitance")
 _f("P_I", "Parallele Stränge aus dem Strom", r"P_I=\left\lceil\frac{I_\mathrm{C0max}}{I_\mathrm{Zelle,max}}\right\rceil",
@@ -148,15 +160,15 @@ _f("R_th_eff", "Effektiver Wärmewiderstand im Modulblock (Lumped)",
    r"R_\mathrm{th,eff}=k\,R_\mathrm{th},\quad k=\frac{n\,A_\mathrm{Zelle}}{A_\mathrm{Box}},\quad "
    r"h=\frac{1}{R_\mathrm{th}A_\mathrm{Zelle}}",
    "R_th,eff = k R_th, k = n A_Zelle / A_Box: gleiche Wärmeübergangszahl wie die Einzelzelle, Wärme nur über "
-   "die Boxoberfläche. Gibt nur einen Mittelwert, keinen Gradienten.", CLAUDE,
-   "Lumped Capacitance / Newton-Kühlung: Incropera et al., Fundamentals of Heat and Mass Transfer, Kap. 5 "
-   "(gültig für Bi < 0,1); Anwendung auf SC-Module nicht validiert")
+   "die Boxoberfläche. Gibt nur einen Mittelwert, keinen Gradienten.", LIT,
+   "Lehrbuch: Incropera et al., Fundamentals of Heat and Mass Transfer, Kap. 5 (Lumped Capacitance, gültig für "
+   "Bi < 0,1); Anwendung auf SC-Module nicht validiert, FEM empfohlen")
 _f("th_scale", "Skalierung auf andere Zellgrößen",
    r"R_\mathrm{th}=R_\mathrm{th,ref}\frac{A_\mathrm{ref}}{A},\quad C_\mathrm{th}=C_\mathrm{th,ref}\frac{m}{m_\mathrm{ref}}",
    "R_th ~ 1/Oberfläche, C_th ~ Masse (von der gemessenen 50-F-Zelle)", CLAUDE)
 _f("esr_eol", "ESR am Lebensende", r"ESR_\mathrm{EOL}=2\,ESR_\mathrm{neu}", "ESR x 2 am Lebensende", CLAUDE,
    "übliches Lebensende-Kriterium (ESR +100 %)")
-_f("net", "Thermisches Netzwerkmodell (Precheck)",
+_f("net", "Thermisches Netzwerkmodell (eigener Ansatz, Precheck, nicht validiert)",
    r"C_\mathrm{th}\frac{\mathrm{d}T_i}{\mathrm{d}t}=P_\mathrm{Zelle}-\frac{T_i-T_{\mathrm{air},i}}{R_\mathrm{air}}"
    r"-\sum_{j\in\mathcal N_i}\frac{T_i-T_j}{R_\mathrm{gap}}-\dot Q_{\mathrm{rad},i},\quad "
    r"T_{\mathrm{air},i}=\frac{\sum_j T_j+(z-m_i+1)T_\infty}{z+1}",

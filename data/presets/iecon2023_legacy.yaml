@@ -39,6 +39,7 @@ req:
   T_amb_C: 25.0
   dT_max_K: 40.0
 opt:
+  include_esr_losses: false
   energy_method: zero_crossing_legacy
   scenarios: [profile, profile_braking]
   c_source: datasheet

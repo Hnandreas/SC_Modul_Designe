@@ -24,8 +24,9 @@ import numpy as np
 from . import equations as eq
 from .database import Database, _isnan, get_database
 from .emulation import CycleTrace, EmulationConfig, HESSEmulator, ModuleModel
-from .selection import coupling_factor
+from .selection import coupling_factor, layout_for, network_params
 from .thermal import cell_loss_lowpass
+from . import thermal_network as TN
 
 
 @dataclass
@@ -43,7 +44,9 @@ class EmuIteration:
     I_rms_module_A: float
     I_rms_cell_A: float
     P_v_cell_mean_W: float
-    dT_max_K: float
+    dT_max_K: float                 # criterion: hottest cell of the network (if active) else block model
+    dT_block_max_K: float
+    dT_net_max_K: float
     t_at_Umin_s: float
     t_at_Umax_s: float
     t_current_limit_s: float
@@ -69,6 +72,7 @@ class EmuDesign:
     module: Optional[ModuleModel] = None
     chain: Optional[dict] = None              # i_cell -> p_v = i^2 ESR -> thermal low-pass (full resolution)
     R_esr_cell_used: float = float("nan")
+    net: Optional[dict] = None                # periodic network response (thermal network active)
     braking_at_s: Optional[float] = None
     notes: list = field(default_factory=list)
 
@@ -106,10 +110,9 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
     cell = db.cell(cell_id)
     S = int(row["S"])
     if cfg is None:
-        cfg = EmulationConfig(eta_dch=req.eta_dch, eta_ch=req.eta_ch)
+        cfg = EmulationConfig(eta_dch=req.eta_dch, eta_ch=req.eta_ch, U_bus_V=req.U_bus_V)
     if cfg.U_conv_min_V is None:
         cfg.U_conv_min_V = req.U_conv_min_V
-    cfg.U_bus_V = req.U_bus_V
     cfg.eol = check_eol
     cfg.L_EOL = req.L_EOL
     prof = res.profile
@@ -142,14 +145,24 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         I_pk = float(np.max(tr.I_sc_peak))
         P_I_emu = eq.p_current(min(I_pk, req.I_C0max_A), float(cell["i_max_A"]))
         chain = None
+        netr = None
         if mod.R_th is not None:
-            r_esr = mod.R_cell_Ohm * (cfg.esr_eol_factor if check_eol else 1.0)
+            # same loss assumption as the thermal page: ESR x thermal_esr_factor
+            r_esr = mod.R_cell_Ohm * opt.thermal_esr_factor
             i_cell = em.cell_current_full(tr, p_load, p_bat, prof.dt)
             chain = cell_loss_lowpass(i_cell, prof.dt, r_esr, mod.R_th, mod.C_th, periodic=True)
             chain["t"] = np.arange(len(i_cell)) * prof.dt
             chain["i_cell"] = i_cell
             out.R_esr_cell_used = r_esr
-        dTm = chain["dT_max"] if chain else float("nan")
+            if opt.thermal_network and opt.geometry == "pcb":
+                lay = layout_for(cell, S, P, opt, req)
+                if lay is not None:
+                    th = dict(rth=float(row["R_th_KperW"]), cth=float(row["C_th_JperK"]))
+                    netr = TN.periodic_response(TN.layout_grid(lay), network_params(cell, th, opt, req),
+                                                chain["t"], chain["p_v"])
+        dT_block = chain["dT_max"] if chain else float("nan")
+        dT_net = netr["dT_max"] if netr else float("nan")
+        dTm = dT_net if netr else dT_block
         reasons = []
         if last.t_at_Umin_s > 0:
             reasons.append(f"U_C0min {last.t_at_Umin_s:.2f} s erreicht")
@@ -164,7 +177,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         if last.t_Uconv_min_s > 0:
             reasons.append(f"Klemmenspannung < U_Wandler,min = {cfg.U_conv_min_V:g} V für {last.t_Uconv_min_s:.2f} s")
         if dTm == dTm and dTm > req.dT_max_K:
-            reasons.append(f"dT = {dTm:.1f} K > {req.dT_max_K:g} K")
+            reasons.append(f"dT = {dTm:.1f} K > {req.dT_max_K:g} K" + (" (Netzwerk, heißeste Zelle)" if netr else ""))
         ok = not reasons
         out.iterations.append(EmuIteration(
             P=P, C_module_F=mod.C_module, C_module_eol_F=mod.C_module * L, U_op_min_V=last.U_min,
@@ -172,10 +185,11 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             P_I_emu=P_I_emu, I_rms_module_A=last.I_sc_rms_A,
             I_rms_cell_A=chain["I_rms"] if chain else last.I_sc_rms_A / P,
             P_v_cell_mean_W=chain["P_v_mean"] if chain else float("nan"), dT_max_K=dTm,
+            dT_block_max_K=dT_block, dT_net_max_K=dT_net,
             t_at_Umin_s=last.t_at_Umin_s, t_at_Umax_s=last.t_at_Umax_s, t_current_limit_s=last.t_current_limit_s,
             E_overflow_J=last.E_overflow_J, E_loss_esr_J=last.E_loss_J, E_loss_conv_J=last.E_conv_loss_J,
             cycles=len(hist), ok=ok, reason="erfüllt" if ok else "; ".join(reasons)))
-        out.trace, out.history, out.module, out.chain = tr, hist, mod, chain
+        out.trace, out.history, out.module, out.chain, out.net = tr, hist, mod, chain, netr
         if ok:
             out.P_final, out.feasible = P, True
             break

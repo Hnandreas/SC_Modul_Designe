@@ -62,6 +62,7 @@ class Requirements:
     r_Q: float = 0.5                     # discharge ratio U_C0min / U_C0max for mode r_Q
     U_C0min_override_V: Optional[float] = None   # value for mode fixed
     U_conv_min_V: Optional[float] = None # optional minimum input voltage of the converter (terminal voltage)
+    U_bus_min_V: Optional[float] = None  # lowest bus/battery voltage (conservative bus currents)
     T_cell_C: float = 65.0               # temperature for the lifetime derating
     t_life_h: float = 40000.0
     L_EOL: float = 0.7
@@ -124,6 +125,8 @@ class Options:
         "cost": 1.0, "mass": 1.0, "volume": 1.0, "losses": 1.0, "thermal": 1.0, "cells": 1.0,
         "reserve": 1.0, "data": 1.0})
     reserve_cap: float = 0.3                       # capacity reserve above this gives no extra benefit
+    # ESR losses during discharge in the capacity sizing (from the steady-state current trajectory)
+    include_esr_losses: bool = True
     # thermal network model (Andy's specification, precheck); switch on the start page
     thermal_network: bool = True
     net_radiation: bool = True
