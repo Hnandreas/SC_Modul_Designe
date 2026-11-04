@@ -18,3 +18,7 @@ data/database/*.sqlite-journal
 
 # old MATLAB scripts (contain names of private data files)
 Old/
+
+# Streamlit agent skills (local symlinks created by streamlit)
+.agents/
+.claude/skills/developing-with-streamlit
