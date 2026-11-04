@@ -92,11 +92,17 @@ Die Emulation prüft das Modul aus dem Flussdiagramm, P und S werden nicht verä
 U_C0inM (vorgeladen), Aufteilung wie in Schritt 2 (der Split lädt den SC nach, kein eigener Nachladeregler).
 Je Zeitschritt: Leistung am SC aus der Busleistung mit Wirkungsgrad (Entladen P_Bus / η_dch, Laden P_Bus η_ch),
 Strom aus der Leistungsbilanz P = U_SC I_SC mit U_SC = U_C - R_ESR I_SC, also
-I_SC = (U_C - sqrt(U_C² - 4 R_ESR P)) / (2 R_ESR) mit der Leistungsgrenze P ≤ U_C² / (4 R_ESR).
-Stromgrenze I_C0max hart; an U_C0min bzw. U_C0max fließt kein weiterer SC-Strom. In allen Fällen liefert bzw.
-nimmt die Batterie den Rest. Ausgegeben werden Zeit an den Spannungsgrenzen, von der Batterie übernommene Energie,
-ESR-Verluste, Spitzen- und RMS-Strom und die Zelltemperatur (gleiches Modell wie Seite 6, periodischer Zustand).
-Überschreitungen erscheinen als rote Hinweise. Standard ist die Prüfung am Lebensende (C x L_EOL, ESR x 2).
+I_SC = (U_C - sqrt(U_C² - 4 R_ESR P)) / (2 R_ESR). Grenze ist der Wandlerstrom I_C0max, darüber liefert die
+Batterie anteilig. An U_C0min hält die Batterie die Spannung, der SC-Strom fließt weiter. Vereinfachte Annahme:
+die ESR-Verluste erwärmen die Zellen, werden aber nicht von der SC-Energie abgezogen. Ausgegeben werden Zeit an
+U_C0min und I_C0max, von der Batterie übernommene Energie, Spitzen- und RMS-Strom und die Zelltemperatur (gleiches
+Modell wie Seite 6, periodischer Zustand). Standard ist die Prüfung am Lebensende (C x L_EOL, ESR x 2).
+
+### Thermik in der Auslegung
+
+Schalter auf der Startseite: "P anpassen" führt die Thermik-Schleife des Flussdiagramms aus (P_T, Schritte 7 bis
+10, mit Netzwerk zusätzlich, wenn auf Seite 6 "Netzwerk für Auslegung" an ist). Standard "ignorieren": ΔT wird
+gerechnet und angezeigt, P nur aus Kapazität und Strom, Hinweis "Thermik ignoriert, wird verbessert".
 
 ### ESR-Verluste in der Energieauslegung
 

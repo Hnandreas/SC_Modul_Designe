@@ -406,8 +406,9 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
         i_cell_rms_max = eq.i_cell_rms_max(req.dT_max_K, R_th_loss, rth_eff)
         P_T = eq.p_thermal(traj.I_rms, i_cell_rms_max)
         det.log.append(f"Schritt 8: I_Modul,RMS = {traj.I_rms:.2f} A, I_Zelle,RMS,max = sqrt({req.dT_max_K:g} K / "
-                       f"({R_th_loss * 1000:.1f} mOhm x {rth_eff:.1f} K/W)) = {i_cell_rms_max:.2f} A -> P_T = {P_T}")
-        if P_T > P:
+                       f"({R_th_loss * 1000:.1f} mOhm x {rth_eff:.1f} K/W)) = {i_cell_rms_max:.2f} A -> P_T = {P_T}"
+                       + ("" if opt.thermal_adjust_P else " (nicht angewendet: Thermik ignoriert, wird verbessert)"))
+        if opt.thermal_adjust_P and P_T > P:
             P = P_T
             traj = trajectory(P)
         P_after_PT = P
@@ -421,6 +422,10 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
                            f"(Grenze {req.dT_max_K:g} K, {opt.thermal_profile})")
             if dTmax <= req.dT_max_K:
                 det.log.append("Schritt 10: zulässig")
+                break
+            if not opt.thermal_adjust_P:
+                thermal_status = "ignoriert (wird verbessert)"
+                det.log.append("Schritt 10: ΔT über der Grenze, Thermik ignoriert (P nicht angepasst, wird verbessert)")
                 break
             if P >= opt.P_limit:
                 feasible, status, thermal_status = False, "unzulässig (Thermik, P-Grenze)", "nicht erfüllt"
@@ -442,7 +447,7 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
     net = None
     if opt.thermal_network and th is not None and traj is not None and opt.geometry == "pcb":
         net = network_check(cell, S, P, th, traj.I_rms / P, R_th_loss, opt, req)
-        if net is not None and opt.net_use_for_design:
+        if net is not None and opt.net_use_for_design and opt.thermal_adjust_P:
             while net.summary()["dT_max_K"] > req.dT_max_K and P < opt.P_limit:
                 P += 1
                 P_net = True
@@ -461,6 +466,8 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
                            f"Zentrum {ns['dT_centre_K']:.1f} K, heißeste {ns['dT_max_K']:.1f} K, außen "
                            f"{ns['dT_outer_mean_K']:.1f} K")
             if ns["dT_max_K"] > req.dT_max_K + 1e-9:
+                if not opt.thermal_adjust_P:
+                    thermal_status = "ignoriert (wird verbessert)"
                 det.warnings.append(f"Netzwerk-Precheck: heißeste Zelle {ns['dT_max_K']:.1f} K über "
                                     f"ΔT_max = {req.dT_max_K:g} K (Netzwerkmodell, nicht validiert).")
     det.network = net
@@ -502,7 +509,7 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
         C_reserve_BOL=C_mod / (C_req_loss * req.L_EOL) - 1 if C_req_loss else np.nan,
         E_loss_dch_J=E_loss_dch, C_req_loss_F=C_req_loss, P_C_no_loss=P_C0,
         I_peak_Umin_A=i_peak_umin, pcb_area_cm2=(lay.area_mm2 / 100 if lay is not None else np.nan),
-        P_driver=p_driver(P, P_C, P_I, P_T, int(P_min), P_loop, P_net),
+        P_driver=p_driver(P, P_C, P_I, P_T if opt.thermal_adjust_P else np.nan, int(P_min), P_loop, P_net),
         ESR_module_mOhm=R_mod * 1000, I_module_max_A=P * float(cell["i_max_A"]),
         mass_kg=mass, volume_dm3=vol, density_kg_dm3=dens, cost_EUR=cost,
         E_usable_EOL_J=E_use_eol, energy_margin=E_use_eol / sc.W_used_J - 1 if sc.W_used_J else np.nan,

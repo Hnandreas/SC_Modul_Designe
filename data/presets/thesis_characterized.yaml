@@ -49,7 +49,7 @@ opt:
   thermal_current: energy_balance
   thermal_profile: periodic
   thermal_coupling: packed_block
-  cell_spacing_mm: 0.5
+  cell_spacing_mm: 1.0
   pcb_orientation: auto
   pcb_bands: 0
   thermal_esr_factor: 2.0

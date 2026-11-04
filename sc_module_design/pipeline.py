@@ -275,7 +275,9 @@ def run_design(inp: DesignInputs, db: Optional[Database] = None, profile: Option
                            for k in res.candidates)
     if skipped:
         s5.summary += f" | {len(skipped)} cells skipped (missing data)"
-    s5.values = dict(skipped=skipped, thermal_mode=opt.thermal_mode)
+    if not opt.thermal_adjust_P:
+        s5.summary += " | Thermik: P nicht angepasst (ignoriert, wird verbessert)"
+    s5.values = dict(skipped=skipped, thermal_mode=opt.thermal_mode, thermal_adjust_P=opt.thermal_adjust_P)
 
     # ------------------------------------------------------------ step 12
     s12 = res.step("12", "Trade-off analysis")

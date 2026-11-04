@@ -251,6 +251,13 @@ def page_start():
                    "Eingabe rechnet sofort neu, fehlende Daten werden übersprungen und rot markiert.")
     with st.container(border=True):
         c = st.columns([1.2, 2])
+        th_opts = {False: "ignorieren, Thermik wird verbessert (P nur aus Kapazität und Strom)",
+                   True: "P anpassen (Thermik-Schleife Schritt 7 bis 10)"}
+        th_adj = c[0].radio("Thermik in der Auslegung", list(th_opts), index=int(bool(inp.opt.thermal_adjust_P)),
+                            format_func=th_opts.get, key=W.key("th_adjust"),
+                            help="Nur wenn aktiv, erhöht die Thermik P (P_T und Schleife, mit Netzwerk zusätzlich, wenn "
+                                 "auf Seite 6 'Netzwerk für Auslegung' an ist). Sonst wird ΔT nur gerechnet und angezeigt.")
+        inp.opt.thermal_adjust_P = bool(th_adj)
         W.check("Thermisches Netzwerkmodell (Precheck) aktiv", inp.opt, "thermal_network", "net_on", container=c[0],
                 help="Eigener Ansatz (nicht validiert): jede Zelle eigene Wärmequelle, Nachbarkopplung, Gradient innen "
                      "nach außen. Aus = nur Einzelzell- und Blockmodell (Lumped).")
@@ -289,7 +296,14 @@ def page_start():
                                 "aus Emulation" if pf else "analytisch", delta_color="off", delta_arrow="off")
                     m[2].metric("C_req", f"{sc.C_req:.2f} F")
                     dts = (inp.selected[sk] or {}).get("dT_max_K", r.dT_max_K) if pf else r.dT_max_K
-                    m[3].metric("ΔT max", ui.fmt(dts, 1, "K"))
+                    m[3].metric("ΔT max", ui.fmt(dts, 1, "K"),
+                                ui.fmt(r.get("dT_net_max_K", float("nan")), 1, "K Netzwerk") if inp.opt.thermal_network
+                                else None, delta_color="off", delta_arrow="off")
+                    if inp.opt.thermal_adjust_P:
+                        st.caption("Thermik: P angepasst (Schleife Schritt 7 bis 10).")
+                    else:
+                        st.markdown("<span style='color:#c62828'>Thermik ignoriert, wird verbessert (P nur aus "
+                                    "Kapazität und Strom).</span>", unsafe_allow_html=True)
                 else:
                     st.info("Noch keine Zelle gewählt (Schritt 7).")
     st.button("Los geht's: 1 Lastprofil →", on_click=go_to, args=("profil",), type="primary")
@@ -471,6 +485,14 @@ def _take_I_rec(val: float):
 
 U_MODES = {"r_Q": "r_Q vorgeben (U_C0min = r_Q U_C0max)", "current": "aus Wandlerstrom (P_SC,max / I_C0max, Diss)",
            "fixed": "U_C0min fest"}
+
+
+def _min_gap(o) -> None:
+    """Cell spacing at least 1 mm (assembly); also corrects an older value in the widget state."""
+    o.cell_spacing_mm = max(1.0, float(o.cell_spacing_mm))
+    k = W.key("gap")
+    if k in st.session_state and float(st.session_state[k]) < 1.0:
+        st.session_state[k] = 1.0
 
 
 def page_spannung():
@@ -676,7 +698,9 @@ def pcb_options(o):
         W.integer("Spalten (0 = auto)", o, "pcb_bands", "pcbb", min_value=0, max_value=60, container=c[3],
                   help="Anzahl Gruppenspalten über die Breite (gerade, je Hälfte des U gleich viele)")
         c = st.columns(4)
-        W.num("Zellabstand [mm]", o, "cell_spacing_mm", "gap", 0.1, min_value=0.0, container=c[0])
+        _min_gap(o)
+        W.num("Zellabstand [mm]", o, "cell_spacing_mm", "gap", 0.1, min_value=1.0, container=c[0],
+              help="Mindestens 1 mm, sonst nicht bestückbar.")
         W.num("Rand [mm]", o, "pcb_margin_mm", "marg", 0.5, min_value=0.0, container=c[1])
         W.num("Ziel-Seitenverhältnis lang/breit", o, "pcb_target_aspect", "tasp", 0.1, min_value=1.0, container=c[2])
         W.num("Leiterplatte [g/cm²]", o, "pcb_areal_mass_g_cm2", "pcbm", 0.05, min_value=0.0, container=c[3],
@@ -857,8 +881,9 @@ def page_thermik():
         if o.thermal_coupling == "factor":
             W.num("Faktor auf R_th", o, "thermal_coupling_factor", "kfac", container=c[3])
         else:
-            W.num("Zellabstand [mm]", o, "cell_spacing_mm", "gap", container=c[3],
-                  help="Gilt für Layout, Blockmodell und Luftspalt im Netzwerk.")
+            _min_gap(o)
+            W.num("Zellabstand [mm]", o, "cell_spacing_mm", "gap", container=c[3], min_value=1.0,
+                  help="Gilt für Layout, Blockmodell und Luftspalt im Netzwerk. Mindestens 1 mm (Bestückung).")
     res = compute()
     if not res.candidates:
         st.info("Keine Kandidaten.")
@@ -910,7 +935,8 @@ def page_thermik():
             W.check("Strahlung oben", o, "net_radiation", "netrad", container=c[0])
             W.num("Emissionsgrad ε", o, "net_eps", "neteps", step=0.01, container=c[1])
             W.check("Netzwerk für Auslegung (P erhöhen)", o, "net_use_for_design", "netdes", container=c[2],
-                    help="P erhöhen, bis die heißeste Zelle im Netzwerk unter ΔT_max liegt. Aus = nur Prüfung.")
+                    help="P erhöhen, bis die heißeste Zelle im Netzwerk unter ΔT_max liegt. Nur wirksam, wenn auf der "
+                         "Startseite 'Thermik: P anpassen' aktiv ist. Aus = nur Prüfung.")
             ui.table(df, ["cell_id", "setup", "I_cell_rms_A", "dT_net_max_K", "dT_net_centre_K", "dT_net_outer_K",
                           "dT_max_K"], key=W.key(f"th_net_tbl_{sk}"), fx_keys=["net", "R_gap", "Q_rad"])
             network_section(res, sk, cid, row, det)
@@ -1229,8 +1255,9 @@ def page_emulation():
                    "P und S bleiben wie in Schritt 5 bis 11, die Emulation ändert nichts. Das Profil läuft einmal ab "
                    "U_C0inM (vorgeladen), Aufteilung wie in Schritt 2 (der Split lädt den SC nach, kein eigener "
                    "Nachladeregler). Je Zeitschritt: Wandler-Wirkungsgrad, I aus P und Klemmenspannung U_C - R I, "
-                   "ESR-Verluste, Stromgrenze I_C0max und Spannungsgrenzen (dort liefert die Batterie den Rest), "
-                   "Zelltemperatur mit demselben Modell wie Seite 6.")
+                   "Stromgrenze I_C0max (darüber liefert die Batterie anteilig), Zelltemperatur mit demselben Modell "
+                   "wie Seite 6. Vereinfacht: ESR-Verluste erwärmen die Zellen, werden aber nicht von der SC-Energie "
+                   "abgezogen.")
     res = compute()
     if res.profile is None or not res.candidates:
         st.info("Für die Emulation werden ein Lastprofil und Kandidaten benötigt.")
@@ -1310,7 +1337,8 @@ def page_emulation():
                      "Modulvolumen [dm³]": lay.volume_dm3 if lay else float("nan"),
                      "Platine [mm]": f"{lay.width_mm:.0f} x {lay.depth_mm:.0f}" if lay else "",
                      "C Modul [F]": last.C_module_F, "U min / max [V]": f"{last.U_op_min_V:.1f} / {last.U_op_max_V:.1f}",
-                     "t an U_C0min [s]": last.t_at_Umin_s, "Batterie übernimmt [J]": last.E_overflow_J,
+                     "t an U_C0min [s]": last.t_at_Umin_s, "t an I_C0max [s]": last.t_current_limit_s,
+                     "Batterie übernimmt [J]": last.E_overflow_J,
                      "ESR-Verlust [J]": last.E_loss_esr_J, "I_peak [A]": last.I_peak_A,
                      "I_Zelle RMS [A]": last.I_rms_cell_A, "ΔT Block [K]": last.dT_block_max_K,
                      "ΔT Netzwerk heißeste [K]": last.dT_net_max_K,
@@ -1318,15 +1346,18 @@ def page_emulation():
     st.markdown("#### Ergebnis (Prüfung, P unverändert)")
     st.dataframe(pd.DataFrame(rows).round(2), hide_index=True, width="stretch")
     for cid, d in out.items():
+        for x in d.info:
+            st.caption(f"{ui.short(cid)}: {x}")
         if not d.feasible:
-            ui.warn(f"{ui.short(cid)} {d.P_final}/{d.S}: {d.iterations[-1].reason}. Hinweis, P wird nicht geändert.")
+            th_txt = ("" if inp.opt.thermal_adjust_P else " Thermik ignoriert, wird verbessert (Startseite).")
+            ui.warn(f"{ui.short(cid)} {d.P_final}/{d.S}: {d.iterations[-1].reason}. P wird nicht geändert.{th_txt}")
     st.latex(r"P_\mathrm{SC,Zelle}=\begin{cases}P_\mathrm{SC,Bus}/\eta_\mathrm{dch}\\P_\mathrm{SC,Bus}\,"
              r"\eta_\mathrm{ch}\end{cases},\quad I_\mathrm{SC}=\frac{U_\mathrm{C}-\sqrt{U_\mathrm{C}^2-4RP_"
-             r"\mathrm{SC,Zelle}}}{2R},\quad \frac{\mathrm{d}E_\mathrm{SC}}{\mathrm{d}t}=-\left(P_\mathrm{SC,Zelle}"
-             r"+RI_\mathrm{SC}^2\right),\quad E_\mathrm{SC}(0)=\tfrac{1}{2}C\,U_\mathrm{C0inM}^2")
-    st.caption("An U_C0min bzw. U_C0max fließt kein weiterer SC-Strom, die Batterie liefert bzw. nimmt den Rest "
-               "(wie bei der Stromgrenze I_C0max). Der Split sieht nur die Last, die ESR-Verluste des SC werden "
-               "dadurch nicht nachgeladen.")
+             r"\mathrm{SC,Zelle}}}{2R}\le I_\mathrm{C0max},\quad \frac{\mathrm{d}E_\mathrm{SC}}{\mathrm{d}t}="
+             r"-P_\mathrm{SC,Zelle},\quad E_\mathrm{SC}(0)=\tfrac{1}{2}C\,U_\mathrm{C0inM}^2")
+    st.caption("Grenze ist der Strom des Wandlers I_C0max, darüber liefert die Batterie anteilig. An U_C0min hält die "
+               "Batterie die Spannung (liefert die fehlende Energie), der SC-Strom fließt weiter. ESR-Verluste nur "
+               "für die Erwärmung, nicht in der Energiebilanz (vereinfachte Annahme wie in der Auslegung).")
     for cid, d in out.items():
         with st.expander(f"{ui.short(cid)}: emuliertes Profil und Rechnung", expanded=cid == cells[0]):
             for n in d.notes:

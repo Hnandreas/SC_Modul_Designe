@@ -198,11 +198,12 @@ _f("W_swing", "Energiehub und Kapazität aus der Emulation",
    r"{L_\mathrm{EOL}\left(U_\mathrm{C0max}^2-U_\mathrm{C0min}^2\right)}",
    "W_swing = max E_SC - min E_SC im periodischen Zyklus, C_req,emu wie C_req", CLAUDE,
    "emulationsbasierte Auslegung (Erweiterung)")
-_f("U_lim", "Spannungsgrenzen in der Emulation",
-   r"E_\mathrm{SC}(0)=\tfrac12 C U_\mathrm{C0inM}^2,\quad E_\mathrm{SC}\in\left[\tfrac12 C U_\mathrm{C0min}^2,"
-   r"\ \tfrac12 C U_\mathrm{C0max}^2\right],\quad P_\mathrm{Bat}=P_\mathrm{Last}-P_\mathrm{SC,geliefert}",
-   "Start vorgeladen bei U_C0inM. An U_C0min bzw. U_C0max wird der SC-Strom so reduziert, dass die Grenze gehalten "
-   "wird, die Batterie liefert bzw. nimmt den Rest. P bleibt unverändert", ANDY_CHAT)
+_f("U_lim", "Grenzen in der Emulation",
+   r"|I_\mathrm{SC}|\le I_\mathrm{C0max},\quad \frac{\mathrm{d}E_\mathrm{SC}}{\mathrm{d}t}=-P_\mathrm{SC},\quad "
+   r"E_\mathrm{SC}(0)=\tfrac12 C U_\mathrm{C0inM}^2,\quad P_\mathrm{Bat}=P_\mathrm{Last}-P_\mathrm{SC,geliefert}",
+   "Start vorgeladen bei U_C0inM. Grenze ist der Wandlerstrom I_C0max, darüber liefert die Batterie anteilig. "
+   "An U_C0min hält die Batterie die Spannung, der SC-Strom fließt weiter. ESR-Verluste nur für die Erwärmung, "
+   "nicht in der Energiebilanz (vereinfacht). P bleibt unverändert", ANDY_CHAT)
 _f("P_rech", "Nachladeregler (optional, aus)", r"P_\mathrm{rech}=K\left(E_\mathrm{Ziel}-E\right),\ |P_\mathrm{rech}|\le P_\mathrm{rech,max}",
    "P_rech = K (E_Ziel - E), begrenzt", CLAUDE)
 

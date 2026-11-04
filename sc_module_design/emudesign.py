@@ -4,13 +4,13 @@ The analytic procedure (steps 1 to 11) gives S and P. The emulation runs the loa
 state U_C0inM with the split of step 2 (e.g. moving average, it recharges the SC; no extra recharge controller) and
 checks this module, P is NOT changed:
 
-    per time step: converter efficiency, I = P/U with the ESR drop, ESR losses, current limit I_C0max (hard, the
-    battery delivers the rest), voltage limits U_C0min / U_C0max (no SC current at the limit, the battery delivers
-    or takes the rest), cell temperature from the emulated cell current (same thermal model as step 7 to 10,
-    periodic state of the repeated profile).
+    per time step: converter efficiency, I = P/U with the ESR drop, ESR losses, converter current limit I_C0max
+    (the limit: above it the battery delivers the rest proportionally), at U_C0min / U_C0max the voltage is held and
+    the battery delivers / takes the energy while the SC current keeps flowing, cell temperature from the emulated
+    cell current (same thermal model as step 7 to 10, periodic state of the repeated profile).
 
-Reported: time at U_C0min / U_C0max, energy taken over by the battery, ESR losses, cell RMS current, dT (block and
-network). The check runs at end of life by default (C x L_EOL, ESR x factor).
+Reported (information, no failure): time at U_C0min / U_C0max and at I_C0max, energy taken over by the battery,
+ESR losses, cell RMS current. Red hint: dT above the limit (block and network). The check runs at end of life by default (C x L_EOL, ESR x factor).
 increase_P=True keeps the old iterative study (P increased until all checks pass); it is not used by the GUI.
 """
 from __future__ import annotations
@@ -75,6 +75,7 @@ class EmuDesign:
     net: Optional[dict] = None                # periodic network response (thermal network active)
     braking_at_s: Optional[float] = None
     notes: list = field(default_factory=list)
+    info: list = field(default_factory=list)  # hints that are no failure (U below U_C0min, current limit)
 
 
 def add_braking_event(t: np.ndarray, p: np.ndarray, t0: float, E_J: float, t_brake_s: float) -> np.ndarray:
@@ -102,7 +103,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
                      check_eol: bool = True, include_braking: Optional[bool] = None,
                      braking_at_s: Optional[float] = None, max_iter: int = 40,
                      db: Optional[Database] = None, P: Optional[int] = None, increase_P: bool = False,
-                     single_pass: bool = True) -> EmuDesign:
+                     single_pass: bool = True, I_C0max: Optional[float] = None) -> EmuDesign:
     """Emulation check of a configuration.
 
     Default: the module of step 5 (P from the flowchart, or P given) is only checked, P is NOT changed.
@@ -112,6 +113,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
     """
     db = db or get_database()
     inp, req, opt = res.inputs, res.inputs.req, res.inputs.opt
+    i_lim = float(I_C0max) if I_C0max else float(req.I_C0max_A)
     sc = res.scenarios[scenario]
     df = res.candidates[scenario]
     row = df[df.cell_id == cell_id].iloc[0].to_dict()
@@ -131,7 +133,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         include_braking = scenario == "profile_braking" and inp.braking.enabled
     if include_braking:
         if braking_at_s is None:
-            em0 = HESSEmulator(t, p_load, p_bat, _module(row, cell, sc, P0, req, opt, req.I_C0max_A), cfg)
+            em0 = HESSEmulator(t, p_load, p_bat, _module(row, cell, sc, P0, req, opt, i_lim), cfg)
             _, tr0 = em0.run_cycle() if single_pass else em0.run_until_steady(max_cycles=60)
             braking_at_s = float(tr0.t[int(np.argmax(tr0.E_sc))] - tr0.t[0])
             out.notes.append(f"Bremsereignis bei t = {braking_at_s:.1f} s (Zeitpunkt maximaler SC-Energie, "
@@ -143,7 +145,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
     seen = set()
     L = req.L_EOL if check_eol else 1.0
     for _ in range(max_iter):
-        mod = _module(row, cell, sc, P, req, opt, req.I_C0max_A)
+        mod = _module(row, cell, sc, P, req, opt, i_lim)
         em = HESSEmulator(t, p_load, p_bat, mod, cfg)
         if single_pass:
             s1, tr = em.run_cycle()
@@ -156,7 +158,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         C_cell = float(row["C_cell_used_F"])
         P_C_emu = eq.p_capacitance(S, C_req_emu, C_cell) if W > 0 else 1
         I_pk = float(np.max(tr.I_sc_peak))
-        P_I_emu = eq.p_current(min(I_pk, req.I_C0max_A), float(cell["i_max_A"]))
+        P_I_emu = eq.p_current(min(I_pk, i_lim), float(cell["i_max_A"]))
         chain = None
         netr = None
         if mod.R_th is not None:
@@ -177,10 +179,10 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         dT_net = netr["dT_max"] if netr else float("nan")
         dTm = dT_net if netr else dT_block
         reasons = []
-        if last.t_at_Umin_s > 0:
-            reasons.append(f"U_C0min {last.t_at_Umin_s:.2f} s erreicht (Batterie übernimmt)")
-        if last.t_at_Umax_s > 0:
-            reasons.append(f"U_C0max {last.t_at_Umax_s:.2f} s erreicht (Batterie übernimmt)")
+        if increase_P and last.t_at_Umin_s > 0:
+            reasons.append(f"U_C0min {last.t_at_Umin_s:.2f} s erreicht")
+        if increase_P and last.t_at_Umax_s > 0:
+            reasons.append(f"U_C0max {last.t_at_Umax_s:.2f} s erreicht")
         if increase_P and P < P_C_emu:
             reasons.append(f"P < P_C,emu = {P_C_emu}")
         if increase_P and P < P_I_emu:
@@ -191,6 +193,14 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             reasons.append(f"Klemmenspannung < U_Wandler,min = {cfg.U_conv_min_V:g} V für {last.t_Uconv_min_s:.2f} s")
         if dTm == dTm and dTm > req.dT_max_K:
             reasons.append(f"dT = {dTm:.1f} K > {req.dT_max_K:g} K" + (" (Netzwerk, heißeste Zelle)" if netr else ""))
+        info = []
+        if last.t_at_Umin_s > 0:
+            info.append(f"an U_C0min {last.t_at_Umin_s:.2f} s, Batterie liefert die Energie, SC-Strom fließt weiter")
+        if last.t_current_limit_s > 0:
+            info.append(f"an I_C0max = {i_lim:g} A {last.t_current_limit_s:.2f} s, Batterie übernimmt anteilig")
+        if last.t_at_Umax_s > 0:
+            info.append(f"an U_C0max {last.t_at_Umax_s:.2f} s, Batterie nimmt den Rest")
+        out.info = info
         ok = not reasons
         out.iterations.append(EmuIteration(
             P=P, C_module_F=mod.C_module, C_module_eol_F=mod.C_module * L, U_op_min_V=last.U_min,

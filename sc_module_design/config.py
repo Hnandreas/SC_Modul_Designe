@@ -115,7 +115,7 @@ class Options:
     thermal_profile: str = "periodic"              # periodic | single_pass
     thermal_coupling: str = "single_cell"          # single_cell | packed_block | factor
     thermal_coupling_factor: float = 1.0           # used for 'factor'
-    cell_spacing_mm: float = 0.5                   # gap between the cells on the PCB (and for 'packed_block')
+    cell_spacing_mm: float = 1.0                   # gap between the cells on the PCB (min. 1 mm for assembly)
     thermal_esr_factor: float = 1.0                # 1 = new cell (BOL), 2 = end of life (ESR +100 %)
     thermal_dt_bin_s: float = 0.01
     P_limit: int = 200
@@ -133,6 +133,9 @@ class Options:
     net_eps: float = 0.05
     net_lambda: float = 0.026
     net_use_for_design: bool = False               # increase P until the hottest cell of the network <= dT_max
+    # thermal loop of the flowchart (steps 7 to 10) adjusts P only if switched on (start page); off = thermal is
+    # computed and shown, P only from capacitance and current ("ignored, thermal design will be improved")
+    thermal_adjust_P: bool = False
 
 
 @dataclass
@@ -161,6 +164,9 @@ class DesignInputs:
         r = d.get("req") or {}
         if "U_C0min_mode" not in r and r.get("U_C0min_override_V"):
             r["U_C0min_mode"] = "fixed"          # older presets: fixed U_C0min
+        o = d.get("opt") or {}
+        if o.get("cell_spacing_mm") is not None and float(o["cell_spacing_mm"]) < 1.0:
+            o["cell_spacing_mm"] = 1.0           # minimum 1 mm between the cells (assembly)
         return _from_dict(cls, d)
 
     @classmethod

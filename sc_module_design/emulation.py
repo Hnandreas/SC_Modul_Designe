@@ -9,12 +9,14 @@ Power balance at the interface converter in every time step:
 
 Per bin (default 10 ms, mean and mean square of the full-resolution power are kept):
   battery    P_bat = p_bat_split + P_rech + P_overflow
-  SC         P_bus,SC = p_sc_split - P_rech, limited by the current limit, the power limit U_C^2/(4R)
-             and the voltage limits U_C0min / U_C0max (the rest is taken by the battery: overflow; at a voltage
-             limit the SC current is reduced, at U_C0min no SC current flows)
+  SC         P_bus,SC = p_sc_split - P_rech, limited by the converter current limit I_C0max (hard) and the power
+             limit U_C^2/(4R), the rest is delivered by the battery (overflow). At U_C0min / U_C0max the voltage is
+             held and the battery delivers / takes the energy, the SC current keeps flowing (the limit is the
+             current of the converter, not the voltage).
   recharge   P_rech = K (E_target - E), limited to +-P_rech_max (optional, off by default: the split, e.g. the
              moving average, recharges the SC)
-  SC energy  dE/dt = -(P_SC + R i^2)           (terminal power + Joule loss in the ESR)
+  SC energy  dE/dt = -P_SC                     (simplified: the ESR loss R i^2 heats the cells but is not taken
+                                               from the stored energy; optional esr_loss_in_energy)
   cell temperature  C_th dT/dt = R_cell i_cell^2 - dT / R_th
 
 ``run_cycle()`` advances one profile period, ``run_until_steady()`` repeats until U and dT are
@@ -75,6 +77,7 @@ class EmulationConfig:
     T_amb_C: float = 25.0
     eta_dch: float = 1.0                # converter efficiency SC -> bus (applied in every time step)
     eta_ch: float = 1.0                 # converter efficiency bus -> SC
+    esr_loss_in_energy: bool = False    # simplified (default): ESR losses heat the cells but are not taken from E_SC
     U_bus_V: float = 48.0               # DC bus voltage (for the bus current I_bus = P_bus / U_bus)
     U_conv_min_V: Optional[float] = None  # minimum input voltage of the converter (terminal voltage U_C - R I)
     max_cycles: int = 200
@@ -99,7 +102,6 @@ class CycleTrace:
     I_sc_peak: np.ndarray           # largest |I_SC| inside each step (full resolution)
     U_term: np.ndarray              # terminal voltage U_C - R I
     I_bus: np.ndarray               # bus-side current of the SC path, P_bus / U_bus
-    scale: Optional[np.ndarray] = None  # current factor per step (< 1 while U_C0min / U_C0max is reached)
 
 
 @dataclass
@@ -189,7 +191,7 @@ class HESSEmulator:
         sm, sq = self.sc.mean.tolist(), self.sc.mean_sq.tolist()
         smax, smin = self.sc.vmax.tolist(), self.sc.vmin.tolist()
         (o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of, o_pc, o_is, o_E, o_ip, o_ut,
-         o_ib, o_sf) = (np.empty(n_bins) for _ in range(16))
+         o_ib) = (np.empty(n_bins) for _ in range(15))
         E, dT = self.E, self.dT
         Ksoc, Pr_max, Et = cfg.K_soc_per_s, cfg.P_rech_max_W, self.E_target
         Elo, Ehi = self.E_lo, self.E_hi
@@ -203,6 +205,7 @@ class HESSEmulator:
         voltage = self.voltage
         stats = self._stats
         soc = cfg.soc_control
+        eloss = cfg.esr_loss_in_energy
         ed, ec = cfg.eta_dch, cfg.eta_ch
         Ubus = cfg.U_bus_V
         t_lo = t_hi = t_ilim = t_plim = E_loss = E_of = E_conv = 0.0
@@ -274,29 +277,17 @@ class HESSEmulator:
             if i2 < i * i:
                 i2 = i * i
             loss = R * i2
-            E_new = E - (pc + loss) * dt
-            sf = 1.0
-            if E_new < Elo or E_new > Ehi:
-                # voltage limit: the SC only delivers / takes the energy up to U_C0min / U_C0max, the current is
-                # reduced accordingly and the battery delivers / takes the rest (no SC current at the limit)
-                Eb = Elo if E_new < Elo else Ehi
-                if E_new < Elo:
-                    t_lo += dt
-                else:
-                    t_hi += dt
-                p_old = pc + loss                   # power taken from the capacitor
-                p_new = (E - Eb) / dt
-                sf = p_new / p_old if p_old != 0.0 else 0.0
-                sf = 0.0 if sf < 0.0 else (1.0 if sf > 1.0 else sf)
-                i *= sf
-                i2 *= sf * sf
-                ipk *= sf
-                loss = R * i2
-                pc_new = sf * p_old - loss          # terminal power that is left
-                bus = pc_new * ed if pc_new > 0 else pc_new / ec
-                overflow += ps - bus
-                ps, pc = bus, pc_new
-                E_new = E - (pc + loss) * dt
+            E_new = E - (pc + loss) * dt if eloss else E - pc * dt
+            if E_new < Elo:
+                # at U_C0min the voltage is held, the SC current keeps flowing (limited only by I_C0max), the
+                # battery delivers the missing energy
+                overflow += (Elo - E_new) / dt * (ed if dis else 1.0)
+                E_new = Elo
+                t_lo += dt
+            elif E_new > Ehi:
+                overflow -= (E_new - Ehi) / dt / (ec if not dis else 1.0)
+                E_new = Ehi
+                t_hi += dt
             E = E_new
             if th:
                 dT = a_th * dT + (1.0 - a_th) * rth * (loss / npc)
@@ -318,7 +309,6 @@ class HESSEmulator:
             o_ip[j] = ipk
             o_ut[j] = U - R * i
             o_ib[j] = ps / Ubus
-            o_sf[j] = sf
             k += 1
             if k >= n:
                 k = 0
@@ -329,7 +319,7 @@ class HESSEmulator:
                        ("E_of", E_of), ("E_conv", E_conv)):
             stats[key] += v
         self.E, self.dT = E, dT
-        return CycleTrace(o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of, o_pc, o_is, o_E, o_ip, o_ut, o_ib, o_sf)
+        return CycleTrace(o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of, o_pc, o_is, o_E, o_ip, o_ut, o_ib)
 
     def _reset_stats(self) -> None:
         self._stats = dict(t_lo=0.0, t_hi=0.0, t_ilim=0.0, t_plim=0.0, E_loss=0.0, E_of=0.0, E_conv=0.0)
@@ -373,8 +363,6 @@ class HESSEmulator:
         pc = np.where(ps > 0, ps / self.cfg.eta_dch, ps * self.cfg.eta_ch)
         i_mod, _ = current_array(pc, U, self.R_mod)
         i_mod = np.clip(i_mod, -self.m.I_max_A, self.m.I_max_A)
-        if trace.scale is not None:                 # no SC current while a voltage limit is reached
-            i_mod = i_mod * np.repeat(trace.scale, k)[: len(i_mod)]
         return i_mod / self.m.P
 
     def run_until_steady(self, max_cycles: Optional[int] = None, accelerate_thermal: bool = True

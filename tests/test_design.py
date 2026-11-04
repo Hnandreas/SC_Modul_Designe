@@ -136,9 +136,14 @@ def test_characterized_with_thermal():
     r = run_design(load_preset("thesis_characterized"))
     df = r.candidates["profile_braking"].set_index("cell_id")
     row = df.loc["VISHAY_HVR235_50F"]
-    assert row.thermal_status == "ok"
-    assert 0 < row.dT_max_K < 40
+    # block model within the limit, the network precheck above it: thermal ignored (P not adjusted, default)
+    assert row.P == 3 and row.thermal_status == "ignoriert (wird verbessert)"
+    assert 0 < row.dT_max_K < 40 < row.dT_net_max_K
     assert "C_eq,E" in row.C_source
+    inp = load_preset("thesis_characterized")
+    inp.opt.thermal_network = False
+    row = run_design(inp).candidates["profile_braking"].set_index("cell_id").loc["VISHAY_HVR235_50F"]
+    assert row.thermal_status == "ok" and row.P == 3
 
 
 def test_emulation_energy_balance():
@@ -156,24 +161,36 @@ def test_emulation_energy_balance():
     assert np.allclose(tr.P_bat + tr.P_sc - tr.P_load, 0, atol=1e-6)
 
 
-def test_emulation_voltage_limit_battery_takes_over():
-    """At U_C0min the SC delivers no further current, the battery covers the load (hard limit, like I_C0max)."""
+def test_emulation_current_limit_is_the_limit():
+    """At U_C0min the voltage is held by the battery and the SC current keeps flowing, limited only by I_C0max.
+    ESR losses only heat the cells (simplified energy balance)."""
     t = np.arange(0, 60, 0.001)
     p = np.full_like(t, 600.0)
     pb = np.zeros_like(p)                                     # split gives everything to the SC
-    m = ModuleModel(S=23, P=1, C_cell_F=30, R_cell_Ohm=0.026, U_min=33, U_max=48, U_init=42, I_max_A=77.7,
+    m = ModuleModel(S=23, P=1, C_cell_F=30, R_cell_Ohm=0.026, U_min=33, U_max=48, U_init=42, I_max_A=15.0,
                     R_th=22.1, C_th=19.7)
     em = HESSEmulator(t, p, pb, m, EmulationConfig())
-    assert not em.cfg.soc_control
+    assert not em.cfg.soc_control and not em.cfg.esr_loss_in_energy
     s, tr = em.run_cycle()
     at = tr.U_sc <= 33.0 + 1e-9
-    assert s.t_at_Umin_s > 10 and at.any()
-    assert np.allclose(tr.I_sc[at][1:], 0.0, atol=1e-9)
-    assert np.allclose(tr.P_bat[at][1:], 600.0)
-    assert np.allclose(tr.P_bat + tr.P_sc - tr.P_load, 0, atol=1e-6)
-    assert tr.U_sc.min() >= 33.0 - 1e-6
-    i_cell = em.cell_current_full(tr, p, pb, 0.001)
-    assert np.allclose(i_cell[-1000:], 0.0)
+    assert s.t_at_Umin_s > 10 and tr.U_sc.min() >= 33.0 - 1e-6
+    assert np.all(tr.I_sc[at] > 0) and np.all(tr.I_sc <= 15.0 + 1e-9)     # current keeps flowing, <= I_C0max
+    assert s.t_current_limit_s > 0 and s.E_overflow_J > 0                  # beyond I_C0max: battery delivers the rest
+    assert s.E_loss_J > 0 and s.dT_max > 0                                 # losses heat the cells
+    # energy: E_SC changes only by the terminal power (simplified)
+    assert em.energy(42.0) - tr.E_sc[0] == pytest.approx(tr.P_sc_cell[0] * em.dt, rel=1e-9)
+
+
+def test_thermal_adjusts_P_only_when_switched_on():
+    inp = load_preset("thesis_characterized")
+    inp.opt.thermal_network = False
+    off = run_design(inp).candidates["profile"]
+    assert (off.P == off[["P_C", "P_I"]].max(axis=1).clip(lower=1)).all()
+    inp.opt.thermal_adjust_P = True
+    on = run_design(inp).candidates["profile"]
+    assert (on.P >= off.P).all()
+    assert (on.P >= on.P_T.fillna(0)).all()
+    assert (on.dT_max_K.fillna(0) <= inp.req.dT_max_K + 1e-6).all() or not on.feasible.all()
 
 
 # ---------------------------------------------------------------------- converter, current, thermal chain
