@@ -258,6 +258,13 @@ def page_start():
                             help="Nur wenn aktiv, erhöht die Thermik P (P_T und Schleife, mit Netzwerk zusätzlich, wenn "
                                  "auf Seite 6 'Netzwerk für Auslegung' an ist). Sonst wird ΔT nur gerechnet und angezeigt.")
         inp.opt.thermal_adjust_P = bool(th_adj)
+        pw_opts = {False: "nur prüfen (rot markieren, P unverändert)",
+                   True: "P anpassen (P_P, Lebensende)"}
+        pw_adj = c[0].radio("Leistungsgrenze P_Bedarf(t) ≤ U_C(t)²/(4 R_Modul)", list(pw_opts),
+                            index=int(bool(inp.opt.power_adjust_P)), format_func=pw_opts.get, key=W.key("pw_adjust"),
+                            help="Maximale Leistung des Moduls aus P = (U_C - R I) I. Aktiv: P mindestens P_P. Sonst "
+                                 "nur Hinweis, die Batterie liefert den Rest.")
+        inp.opt.power_adjust_P = bool(pw_adj)
         W.check("Thermisches Netzwerkmodell (Precheck) aktiv", inp.opt, "thermal_network", "net_on", container=c[0],
                 help="Eigener Ansatz (nicht validiert): jede Zelle eigene Wärmequelle, Nachbarkopplung, Gradient innen "
                      "nach außen. Aus = nur Einzelzell- und Blockmodell (Lumped).")
@@ -299,6 +306,13 @@ def page_start():
                     m[3].metric("ΔT max", ui.fmt(dts, 1, "K"),
                                 ui.fmt(r.get("dT_net_max_K", float("nan")), 1, "K Netzwerk") if inp.opt.thermal_network
                                 else None, delta_color="off", delta_arrow="off")
+                    pr = r.get("P_ratio", float("nan"))
+                    if pr == pr and pr > 1.0 + 1e-9:
+                        st.markdown(f"<span style='color:#c62828'>Leistungsgrenze überschritten: P_Bedarf / "
+                                    f"U_C²/(4R) = {pr:.2f} (Lebensende), nötig P_P = {int(r.P_P)}.</span>",
+                                    unsafe_allow_html=True)
+                    elif inp.opt.power_adjust_P:
+                        st.caption("Leistungsgrenze: P angepasst (P_P).")
                     if inp.opt.thermal_adjust_P:
                         st.caption("Thermik: P angepasst (Schleife Schritt 7 bis 10).")
                     else:
@@ -619,7 +633,8 @@ def page_kapazitaet():
     nav_buttons("kapazitaet")
 
 
-SEL_COLS = ["cell_id", "setup", "P_driver", "P_C_no_loss", "P_C", "P_I", "P_T", "E_loss_dch_J", "C_req_loss_F",
+SEL_COLS = ["cell_id", "setup", "P_driver", "P_C_no_loss", "P_C", "P_I", "P_T", "P_P", "P_ratio", "E_loss_dch_J",
+            "C_req_loss_F",
             "C_cell_used_F", "ESR_cell_mOhm", "C_module_F", "C_reserve", "C_reserve_BOL", "I_peak_Umin_A",
             "ESR_module_mOhm", "I_module_max_A", "cost_EUR", "mass_kg", "volume_dm3", "P_loss_avg_W", "dT_max_K",
             "dT_net_max_K", "pcb_mm", "density_kg_dm3", "status", "warnings"]
@@ -686,17 +701,22 @@ def page_zellen():
 
 
 def pcb_options(o):
-    with st.expander("Leiterplatte: Packung, Ausrichtung, Stecker", expanded=False):
-        st.caption("Die Gruppen (P Zellen parallel) laufen als U: vorne in der Mitte los, links nach hinten, "
-                   "rechts zurück nach vorne. Plus und Minus liegen vorne nebeneinander. Freie Plätze bleiben "
-                   "vorne in der Mitte, dort sitzen die Stecker, damit die Platine nicht größer wird.")
+    with st.expander("Leiterplatte: Layout (Gruppe, Schenkel, Ausrichtung), Packung, Stecker", expanded=True):
+        st.caption("Standard für einfaches Routing: P Zellen nebeneinander als Gruppe, die Gruppen in Serie gerade "
+                   "nach hinten (linker Schenkel) und wieder nach vorne (rechter Schenkel), eine Gruppenspalte je "
+                   "Schenkel, keine Kreuzungen. Plus und Minus vorne, freier Platz vorne, dort die Stecker.")
         c = st.columns(4)
         W.select("Packung", o, "packing", "pk", PACKINGS, container=c[0])
-        W.select("Ausrichtung", o, "pcb_orientation", "pcbor", ORIENTATIONS, container=c[1],
-                 help="lang = Tiefe (von vorne nach hinten) größer als die Breite der Front")
-        W.select("Gruppenform", o, "pcb_group_shape", "pcbgs", GROUP_SHAPES, container=c[2])
-        W.integer("Spalten (0 = auto)", o, "pcb_bands", "pcbb", min_value=0, max_value=60, container=c[3],
-                  help="Anzahl Gruppenspalten über die Breite (gerade, je Hälfte des U gleich viele)")
+        W.select("Gruppe (P parallel)", o, "pcb_group_shape", "pcbgs", GROUP_SHAPES, container=c[1],
+                 help="Reihe: P Zellen nebeneinander quer zur Laufrichtung (Standard).")
+        per_leg = c[2].number_input("Gruppenspalten je Schenkel (0 = auto)", min_value=0, max_value=30,
+                                    value=int(o.pcb_bands) // 2, step=1, key=W.key("pcbleg"),
+                                    help="1 = Gruppen gerade hintereinander (Standard). Mehr Spalten ergeben einen "
+                                         "Mäander mit Querverbindungen.")
+        o.pcb_bands = 2 * int(per_leg)
+        W.select("Ausrichtung", o, "pcb_orientation", "pcbor", ORIENTATIONS, container=c[3],
+                 help="lang = Tiefe (von vorne nach hinten) größer als die Breite der Front. Wirkt bei "
+                      "'auto' für Gruppe oder Spalten.")
         c = st.columns(4)
         _min_gap(o)
         W.num("Zellabstand [mm]", o, "cell_spacing_mm", "gap", 0.1, min_value=1.0, container=c[0],
@@ -815,7 +835,7 @@ def layout_section(res):
     m_mod = m_cells + main.pcb_mass_kg(inp.opt.pcb_areal_mass_g_cm2)
     with c[2]:
         cc = st.columns(3)
-        ui.metric(cc[0], "Platine", f"{main.width_mm:.0f} x {main.depth_mm:.0f} mm", key="layout",
+        ui.metric(cc[0], "Platine", f"{main.width_mm:.0f} x {main.depth_mm:.0f} mm", main.legs_text(), key="layout",
                   calc=f"p = {main.d_mm:g} + {main.gap_mm:g} mm, {main.label()}")
         ui.metric(cc[1], "Modulvolumen", f"{main.volume_dm3:.2f} dm³", key="mass",
                   calc=f"{main.width_mm:.0f} x {main.depth_mm:.0f} x {main.height_mm:.1f} mm")
@@ -1423,6 +1443,13 @@ def page_emulation():
                     ui.show_fig(pl.fig_network_heatmap(nt["steady"], extent=layout_extent(res)),
                                 f"emu_network_{ui.short(cid).replace(' ', '_')}_{d.P_final}", plt_module=pl.plt,
                                 fx_keys=["net", "R_gap", "Q_rad"])
+            pts = d.study or d.iterations
+            st.markdown(f"**Thermik des Moduls über P** (nur Anzeige, das Modul bleibt P = {d.P_final})")
+            ui.show_fig(pl.fig_emudesign(pts, inp.req.dT_max_K, P_used=d.P_final), f"emudesign_{cid}",
+                        plt_module=pl.plt, fx_keys=["W_swing", "P_C", "P_I", "th_first"])
+            if d.study:
+                st.caption("ΔT je P: " + ", ".join(f"P = {i.P}: {i.dT_max_K:.1f} K" for i in d.study)
+                           + f" (Grenze {inp.req.dT_max_K:g} K, {'Netzwerk' if inp.opt.thermal_network else 'Block'}).")
             csv = io.StringIO()
             pd.DataFrame({"t_s": d.trace.t - d.trace.t[0], "P_load_W": d.trace.P_load, "P_bat_W": d.trace.P_bat,
                           "P_sc_bus_W": d.trace.P_sc, "P_sc_cell_W": d.trace.P_sc_cell, "I_sc_A": d.trace.I_sc,

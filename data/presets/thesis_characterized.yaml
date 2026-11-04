@@ -50,8 +50,9 @@ opt:
   thermal_profile: periodic
   thermal_coupling: packed_block
   cell_spacing_mm: 1.0
-  pcb_orientation: auto
-  pcb_bands: 0
+  pcb_orientation: long
+  pcb_bands: 2
+  pcb_group_shape: row
   thermal_esr_factor: 2.0
   weight_preset: robust
 selected:

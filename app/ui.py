@@ -141,6 +141,10 @@ COLUMNS = {
     "P_I": ("P_I", "%d", "P_I = ceil(I_C0max / I_Zelle,max) (Diss)"),
     "P_T": ("P_T", "%d", "P_T = ceil(I_Modul,RMS / I_Zelle,RMS,max), I_Zelle,RMS,max = sqrt(ΔT_max/(ESR R_th,eff)) "
                          "(Diss A01)"),
+    "P_P": ("P_P", "%d", "kleinstes P mit P_Bedarf(t) <= U_C(t)² / (4 R_Modul), Lebensende (C x L_EOL, ESR x Faktor), "
+                         "U_C(t) ab U_C0inM; wirkt nur, wenn auf der Startseite aktiv"),
+    "P_ratio": ("P_Bedarf / Leistungsgrenze", "%.2f", "max über t von P_Bedarf(t) 4 R_Modul / U_C(t)² beim gewählten P; "
+                                                   "> 1: Modul kann die Leistung nicht liefern (Batterie übernimmt)"),
     "P_driver": ("P bestimmt durch", None, "Welcher Term P = max(P_C, P_I, P_T, ...) festlegt"),
     "P_C_no_loss": ("P_C ohne Verluste", "%d", "P_C ohne ESR-Verluste beim Entladen"),
     "E_loss_dch_J": ("Verluste Entladen [J]", "%.0f", "E_V,DCH = (Σ I² R / Σ P) über Entladeabschnitte x E_DCH,max, "

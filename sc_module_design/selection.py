@@ -291,8 +291,38 @@ def max_P_in_space(cell: dict, S: int, opt: Options, req: Requirements, P_limit:
     return best
 
 
-def p_driver(P: int, P_C: int, P_I: int, P_T, P_min: int, P_thermal_loop: bool, P_net: bool) -> str:
+def power_limit_ratio(sc, S: int, P: int, C_cell: float, R_cell: float, esr_factor: float, L_EOL: float) -> tuple:
+    """max_t P_demand(t) 4 R_module / U_C(t)^2 at end of life (C x L_EOL, ESR x factor).
+
+    U_C(t) from the energy-balance trajectory starting at U_C0inM (same as the thermal current). <= 1: the module
+    can deliver the demanded power at every time step. Returns (ratio, t_at_max, U_C at max, P_demand at max)."""
+    R = eq.module_esr(P, S, R_cell) * esr_factor
+    C = eq.module_capacitance(P, S, C_cell) * L_EOL
+    tr = module_current(sc.psc, "energy_balance", sc.U_min, sc.U_inM, sc.U_max, C, R)
+    r = sc.psc.vmax * 4.0 * R / tr.U ** 2
+    k = int(np.argmax(r))
+    return float(r[k]), k * sc.psc.dt, float(tr.U[k]), float(sc.psc.vmax[k])
+
+
+def p_power(sc, S: int, C_cell: float, R_cell: float, esr_factor: float, L_EOL: float, P_limit: int) -> int:
+    """Smallest P with P_demand(t) <= U_C(t)^2 / (4 R_module) for all t (ratio decreases with P: bisection)."""
+    lo, hi = 1, max(1, int(P_limit))
+    if power_limit_ratio(sc, S, hi, C_cell, R_cell, esr_factor, L_EOL)[0] > 1.0:
+        return hi
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if power_limit_ratio(sc, S, mid, C_cell, R_cell, esr_factor, L_EOL)[0] <= 1.0:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+def p_driver(P: int, P_C: int, P_I: int, P_T, P_min: int, P_thermal_loop: bool, P_net: bool,
+             P_P=None) -> str:
     out = []
+    if P_P is not None and P_P == P_P and int(P_P) == P:
+        out.append("Leistung U²/(4R)")
     if P_net:
         out.append("Thermik Netzwerk")
     if P_thermal_loop:
@@ -366,6 +396,17 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
         det.log.append(f"Schritt 6 (Verluste): E_Verlust,DCH = {100 * loss_ratio:.2f} % x {sc.E_dch_J:.1f} J = "
                        f"{E_loss_dch:.1f} J (I² R über die Entladeabschnitte bei U_C0inM, Beharrungszustand, R = S/P ESR x "
                        f"{opt.thermal_esr_factor:g}); C_req inkl. Verluste = {C_req_loss:.3f} F -> P_C = {P_C}, p = {P}")
+
+    # power limit P_demand(t) <= U_C(t)^2 / (4 R_module) at end of life (step 6, own criterion P_P)
+    P_P = np.nan
+    p_ratio = np.nan
+    if sc.psc is not None and R_cell > 0:
+        P_P = p_power(sc, S, C_cell, R_cell, opt.thermal_esr_factor, req.L_EOL, opt.P_limit)
+        det.log.append(f"Schritt 6 (Leistungsgrenze): P_Bedarf(t) <= U_C(t)² / (4 R_Modul), R_Modul = S/P ESR x "
+                       f"{opt.thermal_esr_factor:g}, C x {req.L_EOL:g} (Lebensende), U_C(t) ab U_C0inM -> P_P = {P_P}"
+                       + ("" if opt.power_adjust_P else " (nur Prüfung, P nicht angepasst)"))
+        if opt.power_adjust_P and P_P > P:
+            P = P_P
 
     th = thermal_override if thermal_override else resolve_thermal(cell, thermal_mode, db)
     det.thermal = th
@@ -489,6 +530,16 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
     if E_use_eol + 1e-6 < sc.W_used_J:
         det.warnings.append("Nutzbare Energie am Lebensende kleiner als gefordert.")
     lay = layout_for(cell, S, P, opt, req) if opt.geometry == "pcb" else None
+    p_ratio_info = (np.nan, np.nan, np.nan, np.nan)
+    if sc.psc is not None and R_cell > 0:
+        p_ratio_info = power_limit_ratio(sc, S, P, C_cell, R_cell, opt.thermal_esr_factor, req.L_EOL)
+        p_ratio = p_ratio_info[0]
+        if p_ratio > 1.0 + 1e-9:
+            det.warnings.append(
+                f"Leistungsgrenze: P_Bedarf = {p_ratio_info[3]:.0f} W > U_C² / (4 R_Modul) = "
+                f"{p_ratio_info[2]:.1f}² V² / (4 x {eq.module_esr(P, S, R_cell) * opt.thermal_esr_factor * 1000:.0f} mΩ) = "
+                f"{p_ratio_info[3] / p_ratio:.0f} W bei t = {p_ratio_info[1]:.1f} s (Lebensende), Faktor {p_ratio:.2f}. "
+                f"Nötig P_P = {P_P}" + ("" if opt.power_adjust_P else ", P nicht angepasst (Startseite)") + ".")
     # converter peak current at U_C0min including the ESR drop: P = (U - R I) I
     R_pk = R_mod * opt.thermal_esr_factor
     p_pk = sc.psc.vmax.max() if sc.psc is not None else sc.U_min * sc.I_C0max
@@ -502,14 +553,15 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
                             f"{sc.I_C0max:g} A.")
     row = dict(
         cell_id=cell["cell_id"], manufacturer=cell.get("manufacturer"), c_nom_F=float(cell["c_nom_F"]),
-        S=S, P=P, P_C=P_C, P_I=P_I, P_T=P_T, setup=f"{P}/{S}", n_cells=S * P,
+        S=S, P=P, P_C=P_C, P_I=P_I, P_T=P_T, P_P=P_P, P_ratio=p_ratio, setup=f"{P}/{S}", n_cells=S * P,
         u_cell_max_life_V=u_cell_max_life, C_cell_used_F=C_cell, C_source=c_note,
         ESR_cell_mOhm=R_cell * 1000, ESR_source=r_note,
         C_module_F=C_mod, C_reserve=C_mod / C_req_loss - 1 if C_req_loss else np.nan,
         C_reserve_BOL=C_mod / (C_req_loss * req.L_EOL) - 1 if C_req_loss else np.nan,
         E_loss_dch_J=E_loss_dch, C_req_loss_F=C_req_loss, P_C_no_loss=P_C0,
         I_peak_Umin_A=i_peak_umin, pcb_area_cm2=(lay.area_mm2 / 100 if lay is not None else np.nan),
-        P_driver=p_driver(P, P_C, P_I, P_T if opt.thermal_adjust_P else np.nan, int(P_min), P_loop, P_net),
+        P_driver=p_driver(P, P_C, P_I, P_T if opt.thermal_adjust_P else np.nan, int(P_min), P_loop, P_net,
+                          P_P if opt.power_adjust_P else np.nan),
         ESR_module_mOhm=R_mod * 1000, I_module_max_A=P * float(cell["i_max_A"]),
         mass_kg=mass, volume_dm3=vol, density_kg_dm3=dens, cost_EUR=cost,
         E_usable_EOL_J=E_use_eol, energy_margin=E_use_eol / sc.W_used_J - 1 if sc.W_used_J else np.nan,

@@ -39,8 +39,9 @@ opt:
   esr_current: highest
   geometry: pcb
   packing: hex
-  pcb_orientation: auto
-  pcb_bands: 0
+  pcb_orientation: long
+  pcb_bands: 2
+  pcb_group_shape: row
   thermal_mode: proxy_scaled
   thermal_current: energy_balance
   thermal_profile: periodic

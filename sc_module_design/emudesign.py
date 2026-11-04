@@ -75,7 +75,8 @@ class EmuDesign:
     net: Optional[dict] = None                # periodic network response (thermal network active)
     braking_at_s: Optional[float] = None
     notes: list = field(default_factory=list)
-    info: list = field(default_factory=list)  # hints that are no failure (U below U_C0min, current limit)
+    info: list = field(default_factory=list)  # hints that are no failure (U at U_C0min, current limit)
+    study: list = field(default_factory=list)  # dT over P for the display (P_final unchanged)
 
 
 def add_braking_event(t: np.ndarray, p: np.ndarray, t0: float, E_J: float, t_brake_s: float) -> np.ndarray:
@@ -103,13 +104,16 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
                      check_eol: bool = True, include_braking: Optional[bool] = None,
                      braking_at_s: Optional[float] = None, max_iter: int = 40,
                      db: Optional[Database] = None, P: Optional[int] = None, increase_P: bool = False,
-                     single_pass: bool = True, I_C0max: Optional[float] = None) -> EmuDesign:
+                     single_pass: bool = True, I_C0max: Optional[float] = None,
+                     thermal_study: int = 6) -> EmuDesign:
     """Emulation check of a configuration.
 
     Default: the module of step 5 (P from the flowchart, or P given) is only checked, P is NOT changed.
     single_pass: the profile runs once from the precharged state U_C0inM (the split recharges the SC; with the
     legacy moving average the edge windows need the precharge energy). increase_P=True runs the old
     iterative study (P is increased until all checks pass), only on explicit request.
+    thermal_study: if dT is above the limit, the same emulation is evaluated for P + 1, P + 2, ... (at most this
+    many) until dT <= dT_max, only for the display dT over P (out.study); P_final stays P.
     """
     db = db or get_database()
     inp, req, opt = res.inputs, res.inputs.req, res.inputs.opt
@@ -143,6 +147,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         out.braking_at_s = braking_at_s
     P = P0
     seen = set()
+    study_mode = False
     L = req.L_EOL if check_eol else 1.0
     for _ in range(max_iter):
         mod = _module(row, cell, sc, P, req, opt, i_lim)
@@ -200,9 +205,8 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             info.append(f"an I_C0max = {i_lim:g} A {last.t_current_limit_s:.2f} s, Batterie übernimmt anteilig")
         if last.t_at_Umax_s > 0:
             info.append(f"an U_C0max {last.t_at_Umax_s:.2f} s, Batterie nimmt den Rest")
-        out.info = info
         ok = not reasons
-        out.iterations.append(EmuIteration(
+        it = (EmuIteration(
             P=P, C_module_F=mod.C_module, C_module_eol_F=mod.C_module * L, U_op_min_V=last.U_min,
             U_op_max_V=last.U_max, E_swing_J=W, C_req_emu_F=C_req_emu, P_C_emu=P_C_emu, I_peak_A=I_pk,
             P_I_emu=P_I_emu, I_rms_module_A=last.I_sc_rms_A,
@@ -212,9 +216,22 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             t_at_Umin_s=last.t_at_Umin_s, t_at_Umax_s=last.t_at_Umax_s, t_current_limit_s=last.t_current_limit_s,
             E_overflow_J=last.E_overflow_J, E_loss_esr_J=last.E_loss_J, E_loss_conv_J=last.E_conv_loss_J,
             cycles=len(hist), ok=ok, reason="erfüllt" if ok else "; ".join(reasons)))
+        if study_mode:                               # display only: dT over P, the checked module stays P0
+            out.study.append(it)
+            if not (dTm == dTm) or dTm <= req.dT_max_K or P >= min(P0 + thermal_study, opt.P_limit):
+                break
+            P += 1
+            continue
+        out.info = info
+        out.iterations.append(it)
         out.trace, out.history, out.module, out.chain, out.net = tr, hist, mod, chain, netr
         if ok or not increase_P:
             out.P_final, out.feasible = P, ok
+            if not increase_P and thermal_study > 0 and dTm == dTm and dTm > req.dT_max_K and P < opt.P_limit:
+                out.study.append(it)
+                study_mode = True
+                P += 1
+                continue
             break
         seen.add(P)
         P_next = max(P + 1, P_C_emu, P_I_emu)
@@ -222,7 +239,8 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             out.notes.append("P-Grenze erreicht, keine zulässige Konfiguration gefunden.")
             break
         P = P_next
-    out.P_final = P
+    if increase_P:
+        out.P_final = P
     if increase_P and out.iterations and not out.iterations[-1].ok and not out.notes:
         out.notes.append("Maximale Iterationszahl erreicht.")
     return out

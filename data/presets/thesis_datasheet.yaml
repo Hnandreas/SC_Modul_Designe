@@ -37,8 +37,9 @@ opt:
   esr_source: datasheet_dc
   geometry: pcb
   packing: hex
-  pcb_orientation: auto
-  pcb_bands: 0
+  pcb_orientation: long
+  pcb_bands: 2
+  pcb_group_shape: row
   cell_spacing_mm: 1.0
   thermal_mode: available_only
   thermal_current: energy_balance

@@ -277,7 +277,13 @@ def run_design(inp: DesignInputs, db: Optional[Database] = None, profile: Option
         s5.summary += f" | {len(skipped)} cells skipped (missing data)"
     if not opt.thermal_adjust_P:
         s5.summary += " | Thermik: P nicht angepasst (ignoriert, wird verbessert)"
-    s5.values = dict(skipped=skipped, thermal_mode=opt.thermal_mode, thermal_adjust_P=opt.thermal_adjust_P)
+    n_pw = {k: int((df.get("P_ratio", pd.Series(dtype=float)) > 1.0 + 1e-9).sum()) for k, df in res.candidates.items()}
+    if any(n_pw.values()):
+        s5.summary += (" | Leistungsgrenze U²/(4R) überschritten: "
+                       + ", ".join(f"{k} {n}" for k, n in n_pw.items())
+                       + ("" if opt.power_adjust_P else " (nur geprüft)"))
+    s5.values = dict(skipped=skipped, thermal_mode=opt.thermal_mode, thermal_adjust_P=opt.thermal_adjust_P,
+                     power_adjust_P=opt.power_adjust_P)
 
     # ------------------------------------------------------------ step 12
     s12 = res.step("12", "Trade-off analysis")

@@ -114,6 +114,12 @@ _f("P_C", "Parallele Stränge aus der Kapazität", r"P_C=\left\lceil\frac{S\,C_\
    "P_C = ceil(S C_req / C_Zelle)", ANDY_DISS, "Diss Gl. parallel_capacitance")
 _f("P_I", "Parallele Stränge aus dem Strom", r"P_I=\left\lceil\frac{I_\mathrm{C0max}}{I_\mathrm{Zelle,max}}\right\rceil",
    "P_I = ceil(I_C0max / I_Zelle,max)", ANDY_DISS, "Diss Gl. parallel_current")
+_f("P_P", "Parallele Stränge aus der Leistungsgrenze",
+   r"P_\mathrm{Bedarf}(t)\le\frac{U_C(t)^2}{4R_\mathrm{Modul}},\quad R_\mathrm{Modul}=\frac{S}{P}ESR_\mathrm{Zelle}"
+   r"\;(\times2\ \text{Lebensende}),\quad P_P=\min\left\{P:\ \max_t\frac{4R_\mathrm{Modul}P_\mathrm{Bedarf}(t)}"
+   r"{U_C(t)^2}\le1\right\}",
+   "Maximale Leistung aus P = (U_C - R I) I bei I = U_C / (2R). U_C(t) aus der Energiebilanz ab U_C0inM mit "
+   "C x L_EOL, ESR x Faktor. Wirkt auf P nur, wenn auf der Startseite aktiv", ANDY_CHAT, "Auswahlkriterium Leistung")
 _f("P_T", "Parallele Stränge aus der Thermik",
    r"P_T=\left\lceil\frac{I_\mathrm{Modul,RMS}}{I_\mathrm{Zelle,RMS,max}}\right\rceil,\quad "
    r"I_\mathrm{Zelle,RMS,max}=\sqrt{\frac{\Delta T_\mathrm{max}}{ESR\,R_\mathrm{th,eff}}}",

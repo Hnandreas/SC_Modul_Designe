@@ -55,6 +55,7 @@ class PCBLayout:
     extra_depth_mm: float = 0.0
     free_slots: int = 0
     orientation: str = "auto"
+    legs: tuple = (0, 0)          # groups in the left leg (front -> back) and in the right leg (back -> front)
     fits_limits: bool = True
     notes: list = field(default_factory=list)
 
@@ -95,7 +96,11 @@ class PCBLayout:
 
     def label(self) -> str:
         return (f"{self.width_mm:.0f} x {self.depth_mm:.0f} x {self.height_mm:.0f} mm, "
-                f"{PACKINGS.get(self.packing, self.packing)}, Gruppe {self.gx}x{self.gy}, {self.bands} Spalten")
+                f"{PACKINGS.get(self.packing, self.packing)}, Gruppe {self.gx}x{self.gy}, {self.bands // 2} Spalte(n) "
+                f"je Schenkel, {self.legs_text()}")
+
+    def legs_text(self) -> str:
+        return f"U: links {self.legs[0]} Gruppen nach hinten, rechts {self.legs[1]} nach vorne"
 
 
 def _shapes(P: int, mode: str) -> list[tuple[int, int]]:
@@ -257,6 +262,9 @@ def _build(S, P, d, l, packing, gap, m, pcb_mm, clearance, o, conns) -> PCBLayou
         t_plus = (centres[0][0], m / 2)
         t_minus = (centres[-1][0], m / 2)
     path = [t_plus] + centres + [t_minus]
-    return PCBLayout(S, P, d, l, packing, gap, m, 2 * c, gx, gy, o["cols"], o["rows"], width, depth,
-                     l + pcb_mm + clearance, cells, path, t_plus, t_minus, con_list, bool(o["in_free"]),
-                     float(o["extra"]), int(o["F"]))
+    n_left = min(S, len(left) - o["kL"])
+    lay = PCBLayout(S, P, d, l, packing, gap, m, 2 * c, gx, gy, o["cols"], o["rows"], width, depth,
+                    l + pcb_mm + clearance, cells, path, t_plus, t_minus, con_list, bool(o["in_free"]),
+                    float(o["extra"]), int(o["F"]))
+    lay.legs = (n_left, S - n_left)
+    return lay

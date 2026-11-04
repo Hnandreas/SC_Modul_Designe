@@ -181,6 +181,19 @@ def test_emulation_current_limit_is_the_limit():
     assert em.energy(42.0) - tr.E_sc[0] == pytest.approx(tr.P_sc_cell[0] * em.dt, rel=1e-9)
 
 
+def test_power_limit_criterion_only_when_switched_on():
+    """P_demand(t) <= U_C(t)^2 / (4 R_module) at end of life: P_P is shown, P only changes when switched on."""
+    inp = load_preset("thesis_characterized")
+    inp.opt.thermal_network = False
+    row = run_design(inp).candidates["profile_braking"].set_index("cell_id").loc["VISHAY_HVR235_50F"]
+    assert row.P == 3 and row.P_P > 3 and row.P_ratio > 1
+    R = 23 / 3 * row.ESR_cell_mOhm / 1000 * inp.opt.thermal_esr_factor
+    assert 33.0 ** 2 / (4 * R) == pytest.approx(740, rel=0.01)          # deliverable at U_C0min, end of life
+    inp.opt.power_adjust_P = True
+    row2 = run_design(inp).candidates["profile_braking"].set_index("cell_id").loc["VISHAY_HVR235_50F"]
+    assert row2.P == row.P_P and row2.P_ratio <= 1.0 and "Leistung" in row2.P_driver
+
+
 def test_thermal_adjusts_P_only_when_switched_on():
     inp = load_preset("thesis_characterized")
     inp.opt.thermal_network = False

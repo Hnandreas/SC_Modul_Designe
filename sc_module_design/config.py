@@ -98,9 +98,10 @@ class Options:
     geometry: str = "pcb"                          # pcb | corrected | legacy_iecon
     packing_factor: float = 1.0                    # 'corrected': module volume = cell volume / packing_factor
     packing: str = "hex"                           # PCB layout: hex | square
-    pcb_orientation: str = "auto"                  # auto | long | wide
-    pcb_group_shape: str = "auto"                  # auto | row | column | block
-    pcb_bands: int = 0                             # 0 = auto, else number of group columns (2 legs, U path)
+    pcb_orientation: str = "long"                  # auto | long | wide
+    pcb_group_shape: str = "row"                   # row (P cells side by side, default) | column | block | auto
+    pcb_bands: int = 2                             # number of group columns (2 = one per leg: P side by side, in
+                                                   # series straight to the back and forward again; 0 = auto)
     pcb_margin_mm: float = 5.0
     pcb_clearance_mm: float = 3.0                  # PCB thickness 1.6 mm + this clearance on top of the cell length
     pcb_target_aspect: float = 2.0                 # target depth/width (long) or width/depth (wide)
@@ -136,6 +137,8 @@ class Options:
     # thermal loop of the flowchart (steps 7 to 10) adjusts P only if switched on (start page); off = thermal is
     # computed and shown, P only from capacitance and current ("ignored, thermal design will be improved")
     thermal_adjust_P: bool = False
+    # power limit P_demand(t) <= U_C(t)^2 / (4 R_module) (end of life): P_P adjusts P only if switched on
+    power_adjust_P: bool = False
 
 
 @dataclass

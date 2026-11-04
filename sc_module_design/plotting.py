@@ -539,8 +539,8 @@ def fig_emulation(trace, history, module=None) -> Figure:
     return fig
 
 
-def fig_emudesign(iterations: list, dT_max: float, title_cells: str = "") -> Figure:
-    """Closed-loop design iterations: energy swing / C_req and temperature over P."""
+def fig_emudesign(iterations: list, dT_max: float, title_cells: str = "", P_used: Optional[int] = None) -> Figure:
+    """Energy swing / C_req and temperature over P (P_used: the checked module, marked)."""
     P = [i.P for i in iterations]
     fig, axes = _stack(2, W1, 3.4)
     axes[0].plot(P, [i.C_req_emu_F for i in iterations], "o-", color=UIBK_BLUE, label="$C_\\mathrm{req,emu}$")
@@ -551,6 +551,9 @@ def fig_emudesign(iterations: list, dT_max: float, title_cells: str = "") -> Fig
     axes[1].set_ylabel("$\\Delta T$ [K]")
     axes[1].set_xlabel("Parallel strings P [-]")
     axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
+    if P_used is not None:
+        for ax in axes:
+            ax.axvline(P_used, color="0.5", ls=":", lw=1.0, label=f"Module P = {P_used}" if ax is axes[1] else None)
     for ax in axes:
         panel_legend(ax, ncol=2)
     return fig
