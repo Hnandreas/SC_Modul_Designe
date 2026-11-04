@@ -1,0 +1,20 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+.streamlit/secrets.toml
+
+# results (re-creatable)
+outputs/
+
+# private measurement data: never commit
+data/profiles/private/
+
+# derived database file (rebuilt automatically from the CSV files)
+data/database/sc_database.sqlite
+data/database/*.sqlite-journal
+
+# old MATLAB scripts (contain names of private data files)
+Old/

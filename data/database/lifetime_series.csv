@@ -1,0 +1,6 @@
+series_id,manufacturer,series,u0_V,T0_C,t0_h,dU_V,dT_K,default,source
+VISHAY_235HVR_3V0_65C,Vishay,235 EDLC-HVR,3.0,65.0,2000.0,0.2,10.0,True,Tatschl 2023 (langere-lebensdauer); Power_Plot_V1 lifetime block
+VISHAY_235HVR_2V8_75C,Vishay,235 EDLC-HVR,2.8,75.0,2000.0,0.2,10.0,False,Tatschl 2023; Power_Plot_V1
+VISHAY_235HVR_2V6_85C,Vishay,235 EDLC-HVR,2.6,85.0,2000.0,0.2,10.0,False,Tatschl 2023; Power_Plot_V1
+VISHAY_225R_2V7_65C,Vishay,225 EDLC-R,2.7,65.0,2000.0,0.2,10.0,True,Tatschl 2023; Power_Plot_V1
+VISHAY_225R_2V3_85C,Vishay,225 EDLC-R,2.3,85.0,2000.0,0.2,10.0,False,Tatschl 2023; Power_Plot_V1

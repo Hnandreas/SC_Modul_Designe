@@ -1,0 +1,2 @@
+thermal_id,cell_id,position,condition,current_A,u_hi_V,u_lo_V,T_amb_C,cooling,rth_KperW,cth_JperK,worst_case,source,notes
+VISHAY_HVR235_50F|pos1|c,VISHAY_HVR235_50F,1 (top),c,6.0,3.0,0.8,30.0,"natural convection, still air, vertical",22.1,19.7,True,Diss Tab. thermal_sim_conditions; ECCE 2026 Rth/Cth,"Group III mean, top sensor (highest R_th). Used for PLECS validation."

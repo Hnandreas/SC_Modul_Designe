@@ -1,0 +1,56 @@
+name: iecon2023_legacy
+description: >-
+  Exact reproduction of the IECON 2023 design (Hanschek et al., DOI 10.1109/IECON51785.2023.10311944):
+  datasheet capacitance and DC ESR, forward-looking 20 s moving average as in the original MATLAB
+  script, U_C0min = 33 V, legacy volume formula (diameter used as radius, factor S missing).
+  The robot-arm profile is private (data/profiles/private, not in git). Without it the published
+  energies below are used as manual values.
+profile:
+  path: data/profiles/private/robot_arm_profile.npz
+  scale: 1.0
+manual_load:
+  use: if_no_profile
+  P_peak_W: 2643.0
+  P_avg_W: 392.3
+  E_dch_J: 1214.1
+  E_ch_J: 557.0
+split:
+  name: moving_average
+  params:
+    window_s: 20.0
+    alignment: legacy_matlab
+braking:
+  enabled: true
+  mode: kinematic
+  mass_kg: 880.0
+  v_mps: 1.5
+  t_brake_s: 1.2
+req:
+  U_bus_V: 48.0
+  U_C0max_V: 48.0
+  P_max_mode: peak
+  I_C0max_A: 77.7
+  U_C0min_override_V: 33.0
+  T_cell_C: 65.0
+  t_life_h: 40000.0
+  L_EOL: 0.7
+  T_amb_C: 25.0
+  dT_max_K: 40.0
+opt:
+  energy_method: zero_crossing_legacy
+  scenarios: [profile, profile_braking]
+  c_source: datasheet
+  esr_source: datasheet_dc
+  geometry: legacy_iecon
+  thermal_mode: skip
+selected:
+  profile_braking: {cell_id: VISHAY_HVR235_30F}
+reference:
+  E_dch_J: 1214.1
+  E_ch_J: 557.0
+  U_C0inM_profile: 43.8
+  U_C0inM_profile_braking: 41.9
+  C_req_profile: 4.16
+  C_req_profile_braking: 5.18
+  S: 23
+  U_C01max: 2.13

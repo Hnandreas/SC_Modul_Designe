@@ -1,0 +1,30 @@
+name: legged_robot_example
+description: >-
+  Example with the public quadruped power profile reconstructed from the SVG of LeggedRobotMPC2025
+  (one leg, about 20 Hz effective resolution). Battery pack 46.8 V. Only illustrative: I_C0max,
+  lifetime and temperature are assumptions, braking is not considered.
+profile:
+  path: data/profiles/public/legged_robot_LeggedRobotMPC2025.csv
+  scale: 1.0
+split:
+  name: moving_average
+  params: {window_s: 3.0, alignment: centered}
+braking: {enabled: false}
+req:
+  U_bus_V: 46.8
+  P_max_mode: peak
+  I_C0max_A: 40.0
+  T_cell_C: 45.0
+  t_life_h: 20000.0
+  L_EOL: 0.7
+  T_amb_C: 25.0
+  dT_max_K: 40.0
+opt:
+  energy_method: zero_crossing_exact
+  scenarios: [profile]
+  c_source: datasheet
+  esr_source: datasheet_dc
+  geometry: corrected
+  thermal_mode: proxy
+  thermal_current: energy_balance
+  thermal_profile: periodic

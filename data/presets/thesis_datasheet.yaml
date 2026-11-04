@@ -1,0 +1,40 @@
+name: thesis_datasheet
+description: >-
+  Dissertation, Sec. Supercapacitor Module Design, datasheet-based design: same procedure and inputs as
+  IECON 2023 (values of the thesis text), but physically correct module volume/density, braking power
+  1980 W (t_brake = 1.0 s) and thermal verification for every cell with own R_th/C_th (flowchart default).
+profile:
+  path: data/profiles/private/robot_arm_profile.npz
+  scale: 1.0
+manual_load:
+  use: if_no_profile
+  P_peak_W: 2643.0
+  P_avg_W: 392.3
+  E_dch_J: 1214.1
+  E_ch_J: 557.0
+split:
+  name: moving_average
+  params: {window_s: 20.0, alignment: legacy_matlab}
+braking: {enabled: true, mode: kinematic, mass_kg: 880.0, v_mps: 1.5, t_brake_s: 1.0}
+req:
+  U_bus_V: 48.0
+  U_C0max_V: 48.0
+  P_max_mode: peak
+  I_C0max_A: 77.7
+  U_C0min_override_V: 33.0
+  T_cell_C: 65.0
+  t_life_h: 40000.0
+  L_EOL: 0.7
+  T_amb_C: 25.0
+  dT_max_K: 40.0
+opt:
+  energy_method: zero_crossing_legacy
+  scenarios: [profile, profile_braking]
+  c_source: datasheet
+  esr_source: datasheet_dc
+  geometry: corrected
+  thermal_mode: available_only
+  thermal_current: energy_balance
+  thermal_profile: periodic
+selected:
+  profile_braking: {cell_id: VISHAY_HVR235_30F}

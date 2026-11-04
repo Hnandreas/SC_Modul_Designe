@@ -1,0 +1,6 @@
+scenario,pick,cell_c_F,setup,esr_mOhm,c_module_F,cost_EUR,mass_kg,volume_dm3,density_kg_dm3,source
+module1,density,12,8/23,118,4.1,360,0.92,0.1,9.4,IECON 2023 summary table / Diss Tab. results
+module1,cost,40,3/23,184,5.2,182,0.86,0.09,9.1,IECON 2023 summary table / Diss Tab. results
+module2,density,12,10/23,94,5.2,450,1.15,0.12,9.4,IECON 2023 summary table / Diss Tab. results
+module2,cost,40,3/23,184,5.2,183,0.86,0.09,9.1,IECON 2023 summary table / Diss Tab. results
+module2,selected,30,4/23,150,5.2,298,0.92,0.1,9.0,IECON 2023 summary table / Diss Tab. results

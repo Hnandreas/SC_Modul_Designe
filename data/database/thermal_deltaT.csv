@@ -1,0 +1,21 @@
+cell_id,position,condition,current_A,u_hi_V,u_lo_V,T_amb_C,deltaT_K,source
+VISHAY_HVR235_50F,1,a,4,3.0,0.8,30.0,10.2,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,1,b,4,3.0,1.6,30.0,12.3,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,1,c,6,3.0,0.8,30.0,19.8,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,1,d,6,3.0,1.6,30.0,19.2,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,2,a,4,3.0,0.8,30.0,9.6,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,2,b,4,3.0,1.6,30.0,11.7,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,2,c,6,3.0,0.8,30.0,18.3,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,2,d,6,3.0,1.6,30.0,18.1,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,3,a,4,3.0,0.8,30.0,9.1,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,3,b,4,3.0,1.6,30.0,10.8,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,3,c,6,3.0,0.8,30.0,17.2,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,3,d,6,3.0,1.6,30.0,16.9,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,4,a,4,3.0,0.8,30.0,9.1,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,4,b,4,3.0,1.6,30.0,10.7,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,4,c,6,3.0,0.8,30.0,17.1,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,4,d,6,3.0,1.6,30.0,16.7,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,5,a,4,3.0,0.8,30.0,9.2,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,5,b,4,3.0,1.6,30.0,10.7,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,5,c,6,3.0,0.8,30.0,17.0,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
+VISHAY_HVR235_50F,5,d,6,3.0,1.6,30.0,16.6,Diss Tab. thermal_result; ECCE 2026 Rth/Cth
