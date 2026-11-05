@@ -10,11 +10,14 @@ from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.collections import PathCollection, PolyCollection
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
-from matplotlib.ticker import MaxNLocator
+from matplotlib.path import Path as MplPath
+from matplotlib.text import Text
+from matplotlib.ticker import FormatStrFormatter, MaxNLocator, MultipleLocator
 
 from . import equations as eq
 from . import style
@@ -25,15 +28,111 @@ from .style import (BAND, CM, COLORS, DARK_GREY, DARKGREEN, GREY, LW, MAGENTA, P
 style.apply()
 
 
-def save_fig(fig: Figure, path: str | Path, formats=("pdf", "svg", "png")) -> list[Path]:
+def save_fig(fig: Figure, path: str | Path, formats=("pdf", "svg", "png"), exact_width: bool = True) -> list[Path]:
+    """Save as PDF/SVG/PNG. exact_width: the file is exactly as wide as the figure (8 / 16 cm), only the
+    height is cropped (the thesis includes the PDFs unscaled)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    kw = dict(bbox_inches=style.exact_width_bbox(fig)) if exact_width else {}
     out = []
     for f in formats:
         p = path.with_suffix("." + f)
-        fig.savefig(p)
+        fig.savefig(p, **kw)
         out.append(p)
     return out
+
+
+# ---------------------------------------------------------------------- free label positions
+def _text_box(art: Text, renderer):
+    """Display box of the text only (an annotation's arrow is not part of it)."""
+    if hasattr(art, "update_positions"):
+        art.update_positions(renderer)
+    return Text.get_window_extent(art, renderer)
+
+
+def _hits(ax, bbox, renderer, skip=()) -> int:
+    """Number of artists in ax that the display box bbox covers: lines, bars, fills, markers, texts, legend."""
+    n = 0
+    for ln in ax.lines:
+        if ln in skip or not ln.get_visible():
+            continue
+        path = ln.get_transform().transform_path(ln.get_path())
+        v = path.vertices
+        if v.size and np.isfinite(v).all() and path.intersects_bbox(bbox, filled=False):
+            n += 1
+        elif v.size and not np.isfinite(v).all():
+            v = v[np.isfinite(v).all(axis=1)]
+            n += int(np.any((v[:, 0] >= bbox.x0) & (v[:, 0] <= bbox.x1) & (v[:, 1] >= bbox.y0) & (v[:, 1] <= bbox.y1)))
+        if ln.get_marker() not in (None, "None", "", " ") and v.size:
+            grow = bbox.padded(ln.get_markersize() * renderer.dpi / 72 / 2)
+            n += int(np.any((v[:, 0] >= grow.x0) & (v[:, 0] <= grow.x1) & (v[:, 1] >= grow.y0) & (v[:, 1] <= grow.y1)))
+    for p in ax.patches:
+        if p not in skip and p.get_visible() and p.get_window_extent(renderer).overlaps(bbox):
+            n += 1
+    for c in ax.collections:
+        if c in skip or not c.get_visible():
+            continue
+        if isinstance(c, PolyCollection):
+            tr = c.get_transform()
+            n += int(any(tr.transform_path(pp).intersects_bbox(bbox, filled=True) for pp in c.get_paths()))
+        elif isinstance(c, PathCollection) and len(c.get_offsets()):
+            pts = c.get_offset_transform().transform(c.get_offsets())
+            grow = bbox.padded(5)
+            n += int(np.any((pts[:, 0] >= grow.x0) & (pts[:, 0] <= grow.x1)
+                            & (pts[:, 1] >= grow.y0) & (pts[:, 1] <= grow.y1)))
+    for t in ax.texts:
+        if t not in skip and t.get_visible() and t.get_text() and _text_box(t, renderer).overlaps(bbox):
+            n += 1
+    leg = ax.get_legend()
+    if leg is not None and leg.get_window_extent(renderer).overlaps(bbox):
+        n += 1
+    return n
+
+
+def _arrow_hits(ax, art, bb, renderer) -> int:
+    """Other labels crossed by the arrow of an annotation (text centre to target point)."""
+    if not getattr(art, "arrowprops", None):
+        return 0
+    try:
+        tx, ty = art._get_xy_transform(renderer, art.xycoords).transform(art.xy)   # arrow target (display)
+    except Exception:
+        return 0
+    seg = MplPath([[(bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2], [tx, ty]])
+    return sum(1 for t in ax.texts if t is not art and t.get_visible() and t.get_text()
+               and seg.intersects_bbox(_text_box(t, renderer).padded(2), filled=True))
+
+
+def _place_free(ax, makers: list):
+    """Keep the first label candidate that covers no data and stays inside the axes.
+
+    makers: callables that each add one candidate (Text or Annotation) to ax. They are tried in the given
+    order; if every candidate covers something, the one with the fewest overlaps is kept.
+    """
+    fig = ax.figure
+    fig.canvas.draw()
+    r = fig.canvas.get_renderer()
+    inner = ax.bbox.padded(1)
+    best = None
+    for i, mk in enumerate(makers):
+        art = mk()
+        bb = _text_box(art, r).padded(2)
+        inside = inner.x0 <= bb.x0 and bb.x1 <= inner.x1 and inner.y0 <= bb.y0 and bb.y1 <= inner.y1
+        cost = _hits(ax, bb, r, skip=(art,)) + (0 if inside else 100) + _arrow_hits(ax, art, bb, r)
+        art.remove()
+        if best is None or cost < best[0]:
+            best = (cost, i)
+        if cost == 0:
+            break
+    return makers[best[1]]()
+
+
+def _annotate_free(ax, text: str, xy, xs=(0.25, 0.4, 0.5, 0.6, 0.75), ys=(0.94, 0.82, 0.70)):
+    """Annotation with arrow to xy (data); text in the first free spot near the top (axes fraction)."""
+    px = ax.transAxes.inverted().transform(ax.transData.transform(xy))[0]
+    cand = [(x, y) for y in ys for x in sorted(xs, key=lambda x: abs(x - px))]
+    kw = dict(xycoords="data", textcoords="axes fraction", ha="center", va="top",
+              arrowprops=dict(arrowstyle="->", lw=0.7), bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none"))
+    return _place_free(ax, [lambda c=c: ax.annotate(text, xy, xytext=c, **kw) for c in cand])
 
 
 def _stack(n: int, width: float = W1, h_each: float = 3.6, sharex: bool = True, ratios=None):
@@ -77,12 +176,26 @@ def fig_peaks(res) -> Figure:
                whiskerprops=dict(color=UIBK_BLUE), capprops=dict(color=UIBK_BLUE))
     a1.set_yticks([])
     a1.tick_params(labelbottom=False)
-    for v in (pk["upper_fence"], pk["max_peak"]):
-        a1.annotate(f"{v:.0f} W", (v, 1.33), ha="center", va="bottom", fontsize=style.FONT_PT)
+    lines = (pk["upper_fence"], pk["max_peak"])      # Q3 + 1.5 IQR and largest peak
+    for v in lines:
         a2.axvline(v, color="k", ls="--", lw=0.9)
     a2.hist(pk["peaks"], bins=15, color=BAND, edgecolor=UIBK_BLUE, lw=0.6)
     a2.set_xlabel("Power [W]")
     a2.set_ylabel("Number of peaks [-]")
+    # values horizontally in the histogram next to their line (left first), nothing above the box plot;
+    # if the lines are close, the text moves further out with a short arrow to its line
+    heights = (0.97, 0.87, 0.77, 0.67, 0.57)
+    for v in lines:
+        plain = [lambda v=v, y=y, s=s: a2.annotate(
+            f"{v:.0f} W", (v, y), xycoords=("data", "axes fraction"), xytext=(-3 * s, 0),
+            textcoords="offset points", ha="right" if s > 0 else "left", va="center")
+            for y in heights for s in (1, -1)]
+        arrow = [lambda v=v, y=y, s=s, dx=dx: a2.annotate(
+            f"{v:.0f} W", (v, y), xycoords=("data", "axes fraction"), xytext=(-dx * s, 0),
+            textcoords="offset points", ha="right" if s > 0 else "left", va="center",
+            arrowprops=dict(arrowstyle="->", lw=0.7, shrinkA=1, shrinkB=0))
+            for y in heights for dx in (24, 40, 56) for s in (1, -1)]
+        _place_free(a2, plain + arrow)
     return fig
 
 
@@ -154,21 +267,36 @@ def fig_voltage_levels(res, scenario: str = "profile_braking", series_id: Option
 def fig_lifetime(res, db, t_range=(1e3, 5e4)) -> Figure:
     req = res.inputs.req
     t = np.logspace(math.log10(t_range[0]), math.log10(t_range[1]), 400)
-    fig, ax = plt.subplots(figsize=(W1, 6.2 * CM))
+    fig, ax = plt.subplots(figsize=(W1, 7.0 * CM))     # taller: the legend below has four lines
     life = db.lifetime
     rows = life[life.series_id.isin(set(res.series_info)) | (life["default"].astype(str).str.lower() == "true")]
     for i, (_, s) in enumerate(rows.iterrows()):
         u = s.u0_V - (np.log2(t / s.t0_h) - (s.T0_C - req.T_cell_C) / s.dT_K) * s.dU_V
-        ax.semilogx(t, np.minimum(u, s.u0_V), color=COLORS[i % len(COLORS)],
-                    label=f"Series {s.series.split()[0]}, $U_\\mathrm{{C0N1}}$ = {s.u0_V:g} V")
-    for si in res.series_info.values():
-        ax.plot(req.t_life_h, si["U_C01max"], "o", color=MAGENTA, mec="white", mew=0.6, ms=5)
-        ax.annotate(f"{si['U_C01max']:.2f} V", (req.t_life_h, si["U_C01max"]), xytext=(-42, 22),
-                    textcoords="offset points", arrowprops=dict(arrowstyle="->", lw=0.7))
+        # legend as in the thesis figure (series, T0, rated voltage, voltage step per lifetime doubling)
+        lab = (f"Series {s.series}\n$T_0$ = {s.T0_C:g} °C, $U_\\mathrm{{C0N1}}$ = {s.u0_V:.1f} V, "
+               f"$\\Delta U_\\mathrm{{tC01}}$ = {s.dU_V:.1f} V")
+        ax.semilogx(t, np.minimum(u, s.u0_V), color=COLORS[i % len(COLORS)], label=lab)
+    pts = {(float(req.t_life_h), round(float(si["U_C01max"]), 6)) for si in res.series_info.values()}
+    for x, y in pts:
+        ax.plot(x, y, "o", color=MAGENTA, mec="white", mew=0.6, ms=5)
     ax.set_xlabel("Estimated lifetime [h]")
     ax.set_ylabel("Max. cell voltage [V]")
-    ax.text(0.98, 0.95, f"T = {req.T_cell_C:g} °C", transform=ax.transAxes, ha="right", va="top")
+    ax.yaxis.set_major_locator(MultipleLocator(0.2))
+    ax.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
     legend_below(fig, ncol=1)
+    # assumed cell temperature T of Eq. (voltagelife); T_0 in the legend is the reference of the series
+    t_txt = f"Assumed cell temperature $T$ = {req.T_cell_C:g} °C"
+    _place_free(ax, [lambda c=c: ax.text(c[0], c[1], t_txt, transform=ax.transAxes, ha=c[2], va="top")
+                     for c in ((0.98, 0.96, "right"), (0.98, 0.86, "right"), (0.5, 0.96, "center"),
+                               (0.02, 0.12, "left"))])
+    for x, y in sorted(pts):
+        # label above the point (free area), else left of it or below; never across a curve
+        offs = [(0, 26, "center", "bottom"), (0, 36, "center", "bottom"), (-22, 26, "right", "bottom"),
+                (0, -24, "center", "top"), (-22, -22, "right", "top"), (-30, 0, "right", "center")]
+        _place_free(ax, [lambda o=o: ax.annotate(f"{y:.2f} V", (x, y), xytext=o[:2], textcoords="offset points",
+                                                 ha=o[2], va=o[3], arrowprops=dict(arrowstyle="->", lw=0.7,
+                                                                                   shrinkB=4))
+                         for o in offs])
     return fig
 
 
@@ -186,6 +314,7 @@ def fig_energy_excursions(res, windows: str | tuple = "auto", half_width: float 
             a = max(t[0], c - half_width)
             wins.append((a, a + 2 * half_width))
     fig, axes = _stack(2, W1, 3.4, sharex=False)
+    notes = []
     for ax, (w0, w1), seg, val, col, lab in zip(
             axes, wins, (ex.dch_segment, ex.ch_segment), (ex.E_dch_J, -ex.E_ch_J), (UIBK_ORANGE, PINK),
             ("$E_\\mathrm{DCH,max}$", "$E_\\mathrm{CH,max}$")):
@@ -195,15 +324,15 @@ def fig_energy_excursions(res, windows: str | tuple = "auto", half_width: float 
         a, b = seg
         ax.fill_between(t[a:b], p[a:b], color=col, alpha=0.6, lw=0,
                         label="Max. discharge excursion" if val > 0 else "Max. charge excursion")
-        ax.annotate(f"{lab} = {val:.1f} J", (t[(a + b) // 2], np.mean(p[a:b])), xytext=(0.62, 0.86),
-                    textcoords="axes fraction", ha="center", va="top", arrowprops=dict(arrowstyle="->", lw=0.7),
-                    bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none"))
+        notes.append((ax, f"{lab} = {val:.1f} J", (t[(a + b) // 2], np.mean(p[a:b]))))
         ax.axhline(0, color="k", lw=0.5)
         ax.set_xlim(w0, w1)
         ax.set_ylabel("SC power [W]")
         ax.tick_params(labelbottom=True)
-        panel_legend(ax, ncol=2)
     axes[-1].set_xlabel("Time [s]")
+    legend_below(fig, ncol=2)                        # one legend for both panels, SC power only once
+    for ax, txt, xy in notes:
+        _annotate_free(ax, txt, xy)
     return fig
 
 
@@ -222,6 +351,8 @@ TRADEOFF_QUANTITIES = {
     "rel_density_kg_dm3": ("Density vs. reference [%]", "[%]"),
     "rel_mass_kg": ("Mass vs. reference [%]", "[%]"),
     "rel_cost_EUR": ("Cost vs. reference [%]", "[%]"),
+    "n_cells": ("Number of cells [-]", "[-]"),
+    "module_height_mm": ("Module height [mm]", "[mm]"),
 }
 
 
@@ -257,7 +388,7 @@ def fig_tradeoff(res, scenarios=("profile", "profile_braking"), cmap: str = "jet
         v = np.concatenate([d[col].to_numpy(float) for d in src])
         return np.nanmin(v), np.nanmax(v)
 
-    fig = plt.figure(figsize=(8.5 * CM, 9.6 * CM))
+    fig = plt.figure(figsize=(W1, 9.6 * CM))
     gs = fig.add_gridspec(3, len(scen) + 1, height_ratios=[1, 1, 0.07], width_ratios=[1] * len(scen) + [0.32])
     handle = None
     any_bad = False
@@ -305,7 +436,8 @@ def fig_tradeoff(res, scenarios=("profile", "profile_braking"), cmap: str = "jet
         lax.axis("off")
         lax.scatter([0.15, 0.15, 0.15], [0.1, 0.5, 0.9], s=[18, 53, 88], c=["k", "none", "k"], edgecolors="k",
                     lw=0.5, zorder=5, clip_on=False)
-        fmt = "{:.0f}" if max(abs(smax), abs(smin)) >= 100 or scol.startswith("rel_") else "{:.2f}"
+        fmt = ("{:.0f}" if max(abs(smax), abs(smin)) >= 100 or scol.startswith("rel_")
+               or scol in ("n_cells", "module_height_mm") else "{:.2f}")
         lax.text(0.55, 0.9, fmt.format(smax), va="center")
         lax.text(0.55, 0.1, fmt.format(smin), va="center")
         lax.text(1.4, 0.5, units.get(scol, scol), rotation=90, va="center", ha="center")
@@ -435,11 +567,12 @@ def fig_dT_candidates(df, dT_max: float) -> Figure:
 # ---------------------------------------------------------------------- emulation
 def fig_emulated_profile(trace, module, sc=None, t_window: Optional[tuple] = None, i_limit: Optional[float] = None,
                          u_conv_min: Optional[float] = None, u_bus: Optional[float] = None,
-                         u_bus_used: Optional[float] = None, thermal: bool = True, net: Optional[dict] = None
+                         u_bus_used: Optional[float] = None, thermal: bool = True, net: Optional[dict] = None,
+                         converter_max_V: Optional[float] = None, battery_reference_W=None
                          ) -> Figure:
     """Emulated HESS over one periodic cycle.
 
-    (a) voltages: bus/battery voltage, SC internal voltage U_C and terminal voltage U_C - R I
+    (a) voltages: bus/battery voltage, SC internal voltage U_C and terminal voltage U_C + R I
     (b) bus currents: load, battery and SC on the bus side (P / U_bus)
     (c) SC currents: module current I_SC and bus-side current I_SC,bus
     (d) optional: cell temperature rise (thermal network if available, else block model)
@@ -455,8 +588,10 @@ def fig_emulated_profile(trace, module, sc=None, t_window: Optional[tuple] = Non
         ax.axhline(u_bus, color=UIBK_ORANGE, lw=LW, label="Bus / battery $U_\\mathrm{Bus}$")
     if u_bus_used and u_bus and abs(u_bus_used - u_bus) > 1e-9:
         ax.axhline(u_bus_used, color=UIBK_ORANGE, ls=":", lw=1.0, label="$U_\\mathrm{Bus,min}$ (conservative)")
+    if converter_max_V is not None:
+        ax.axhline(converter_max_V, color=GREY, ls=":", lw=0.8, label="Converter ceiling $D_\\max U_\\mathrm{Bus}$")
     ax.plot(t[m], trace.U_sc[m], color=UIBK_BLUE, label="SC internal $U_C$")
-    ax.plot(t[m], trace.U_term[m], color=PINK, lw=0.6, label="SC terminal $U_C - R I$")
+    ax.plot(t[m], trace.U_term[m], color=PINK, lw=0.6, label="SC terminal $U_C + R I$")
     ax.axhline(module.U_min, color="k", ls="--", lw=0.8, label="$U_\\mathrm{C0min}$, $U_\\mathrm{C0max}$")
     ax.axhline(module.U_max, color="k", ls="--", lw=0.8)
     if u_conv_min:
@@ -465,14 +600,26 @@ def fig_emulated_profile(trace, module, sc=None, t_window: Optional[tuple] = Non
     ax = axes[1]
     ax.plot(t[m], trace.P_load[m] / ub, color=GREY, lw=0.6, label="Load $I_\\mathrm{Last}$")
     ax.plot(t[m], trace.P_bat[m] / ub, color=UIBK_ORANGE, lw=LW, label="Battery $I_\\mathrm{Bat}$")
+    if battery_reference_W is not None:
+        ax.plot(t[m], np.asarray(battery_reference_W)[m] / ub, color=GREY, ls="--", lw=0.8,
+                label="Battery filter reference (without PI)")
     ax.plot(t[m], trace.P_sc[m] / ub, color=UIBK_BLUE, lw=0.8, label="SC bus side $I_\\mathrm{SC,Bus}$")
-    ax.set_ylabel("Bus current [A]")
+    ax.set_ylabel("Bus current, conservative [A]" if u_bus and abs(ub-u_bus) > 1e-9 else "Bus current [A]")
     ax = axes[2]
-    ax.plot(t[m], trace.I_sc[m], color=UIBK_BLUE, lw=0.8, label="SC module $I_\\mathrm{SC}$")
-    ax.plot(t[m], trace.P_sc[m] / ub, color=UIBK_ORANGE, lw=0.7, label="SC bus side $I_\\mathrm{SC,Bus}$")
+    ax.plot(t[m], trace.I_sc[m], color=UIBK_BLUE, lw=0.8, label="SC module $I_\\mathrm{SC}$ (+ charge / − discharge)")
+    ax.plot(t[m], trace.I_bus[m], color=UIBK_ORANGE, lw=0.7, label="SC bus side $I_\\mathrm{SC,Bus}$")
     if i_limit:
         ax.axhline(i_limit, color="k", ls="--", lw=0.8, label="Current limit $I_\\mathrm{C0max}$")
         ax.axhline(-i_limit, color="k", ls="--", lw=0.8)
+    limited = getattr(trace, "current_limited", None)
+    requested = getattr(trace, "requested_current_extreme_A", None)
+    if limited is not None and requested is not None and i_limit:
+        hit = m & limited
+        if np.any(hit):
+            ax.scatter(t[hit], np.sign(requested[hit]) * i_limit, color=MAGENTA, s=15,
+                       zorder=6, label="SC current limiter active")
+            ax.scatter(t[hit], requested[hit], color=MAGENTA, marker="x", s=12,
+                       zorder=6, label="Requested current before limit")
     ax.set_ylabel("SC current [A]")
     if has_dT:
         ax = axes[3]

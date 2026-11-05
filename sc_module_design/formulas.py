@@ -204,14 +204,28 @@ _f("W_swing", "Energiehub und Kapazität aus der Emulation",
    r"{L_\mathrm{EOL}\left(U_\mathrm{C0max}^2-U_\mathrm{C0min}^2\right)}",
    "W_swing = max E_SC - min E_SC im periodischen Zyklus, C_req,emu wie C_req", CLAUDE,
    "emulationsbasierte Auslegung (Erweiterung)")
-_f("U_lim", "Grenzen in der Emulation",
-   r"|I_\mathrm{SC}|\le I_\mathrm{C0max},\quad \frac{\mathrm{d}E_\mathrm{SC}}{\mathrm{d}t}=-P_\mathrm{SC},\quad "
-   r"E_\mathrm{SC}(0)=\tfrac12 C U_\mathrm{C0inM}^2,\quad P_\mathrm{Bat}=P_\mathrm{Last}-P_\mathrm{SC,geliefert}",
-   "Start vorgeladen bei U_C0inM. Grenze ist der Wandlerstrom I_C0max, darüber liefert die Batterie anteilig. "
-   "An U_C0min hält die Batterie die Spannung, der SC-Strom fließt weiter. ESR-Verluste nur für die Erwärmung, "
-   "nicht in der Energiebilanz (vereinfacht). P bleibt unverändert", ANDY_CHAT)
-_f("P_rech", "Nachladeregler (optional, aus)", r"P_\mathrm{rech}=K\left(E_\mathrm{Ziel}-E\right),\ |P_\mathrm{rech}|\le P_\mathrm{rech,max}",
-   "P_rech = K (E_Ziel - E), begrenzt", CLAUDE)
+_f("U_lim", "Physikalische Grenzen der kontinuierlichen Emulation",
+   r"|I_\mathrm{SC}|\le I_\mathrm{C0max},\quad U_\mathrm{Klemme}=U_C+RI_\mathrm{SC},\quad "
+   r"\frac{\mathrm{d}E}{\mathrm{d}t}=-P_\mathrm{Klemme,out}-RI_\mathrm{SC,RMS}^2",
+   "Positiver SC-Strom lädt, negativer entlädt. An U_min/U_max wird der tatsächliche Strom begrenzt, "
+   "nicht nur die Spannung festgehalten. Energie und PI-Zustand laufen über Profilgrenzen weiter. "
+   "P und S bleiben unverändert.", ANDY_CHAT)
+_f("P_rech", "Spannungs-PI statt Energie-Nachladeregler",
+   r"e=U_\mathrm{ref}-U_\mathrm{Klemme},\quad i_\mathrm{PI}=\mathrm{sat}_{[-5,5]}(0.2e+x_I)",
+   "Spannungs-PI aus Interleaved 6; keine unabhängige Nachladeleistungsgrenze.", ANDY_DISS,
+   "Only_PWM_Interlaved6/Core/User/Src/user_control.c:54 und user_config.h:166")
+_f("emu_I_sc", "Vorzeichen in der Emulation",
+   r"I_\mathrm{SC}>0:\ \mathrm{Laden},\quad I_\mathrm{SC}<0:\ \mathrm{Entladen},\quad "
+   r"U_\mathrm{Klemme}=U_C+RI_\mathrm{SC}",
+   "SC-Strom positiv in den Kondensator. RMS und Betrags-Spitzenstrom bleiben nichtnegativ. "
+   "Leistung P_SC bleibt positiv bei Abgabe an den Bus.", ANDY_CHAT)
+_f("emu_PI", "Reglerzeitbasis",
+   r"f_\mathrm{PI}=\frac{100\,\mathrm{kHz}}{5}=20\,\mathrm{kHz},\quad "
+   r"T_s=50\,\mathrm{\mu s},\quad x_I\mathrel{+}=K_i e T_s",
+   "Kp = 0,2 A/V; Ki = 0,5 A/(V s); Ki je echtem Aufruf = 0,000025 A/V. "
+   "Bedingte Integration wie Interleaved 6. Frequenz/Teiler nach Nutzerkorrektur vom 04.11.2026. "
+   "Regleraufrufe bei gehaltenem Feedback je Pflanzenbin analytisch zusammengefasst; "
+   "keine 20-kHz-Simulation der Schaltvorgänge.", ANDY_CHAT)
 
 
 def text(key: str, calc: str = "") -> str:

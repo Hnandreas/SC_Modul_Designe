@@ -7,10 +7,13 @@ no titles, widths 8 cm (single column) and 16 cm (double column).
 """
 from __future__ import annotations
 
+import warnings
+
 import matplotlib as mpl
 
 mpl.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.transforms import Bbox  # noqa: E402
 
 UIBK_BLUE = "#003361"
 UIBK_ORANGE = "#f39200"
@@ -81,8 +84,28 @@ def apply() -> None:
     plt.rcParams.update(RC)
 
 
-def legend_below(ax_or_fig, handles=None, labels=None, ncol: int = 3, y: float = -0.02):
-    """Legend centred below the figure (as in the thesis)."""
+def exact_width_bbox(fig, pad_in: float = 0.02) -> Bbox:
+    """Save box with exactly the figure width (8.0 cm / 16.0 cm) and only the height cropped to the content.
+
+    savefig(bbox_inches="tight") also crops the width, so an 8 cm figure came out 7.9 cm (or 8.4 cm).
+    The thesis includes the PDFs unscaled, so the width must stay the figsize width (8 pt stays 8 pt).
+    Content outside the width would be cut: this raises a warning.
+    """
+    fig.canvas.draw()
+    tb = fig.get_tightbbox(fig.canvas.get_renderer())
+    w, _ = fig.get_size_inches()
+    if tb.x0 < -0.01 or tb.x1 > w + 0.01:
+        warnings.warn(f"Figure content exceeds the figure width ({tb.x0:.2f} to {tb.x1:.2f} in, width {w:.2f} in)")
+    return Bbox([[0.0, tb.y0 - pad_in], [w, tb.y1 + pad_in]])
+
+
+def _row_major(items: list, ncol: int) -> list:
+    """Order for matplotlib's column-wise legend filling so that the entries read row by row."""
+    return [items[r * ncol + c] for c in range(ncol) for r in range(len(items)) if r * ncol + c < len(items)]
+
+
+def legend_below(ax_or_fig, handles=None, labels=None, ncol: int = 3, y: float = -0.02, row_major: bool = True):
+    """Legend centred below the figure (as in the thesis). Entries read row by row."""
     fig = ax_or_fig if hasattr(ax_or_fig, "legend") and not hasattr(ax_or_fig, "plot") else ax_or_fig.figure
     if handles is None:
         handles, labels = [], []
@@ -92,6 +115,8 @@ def legend_below(ax_or_fig, handles=None, labels=None, ncol: int = 3, y: float =
                 if ll not in labels and not ll.startswith("_"):
                     handles.append(hh)
                     labels.append(ll)
+    if row_major and ncol > 1:
+        handles, labels = _row_major(list(handles), ncol), _row_major(list(labels), ncol)
     return fig.legend(handles, labels, loc="outside lower center", ncol=ncol, frameon=False)
 
 

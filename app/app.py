@@ -37,6 +37,7 @@ from sc_module_design.paths import DB_DIR, PRESET_DIR, PRIVATE_PROFILE_DIR, PROJ
 from sc_module_design.pipeline import SCENARIOS, prepare_profile, run_design  # noqa: E402
 from sc_module_design.profile import decimate_for_plot, list_profiles  # noqa: E402
 from sc_module_design.report import compare_with_reference, export_run, latex_results_table, summary_dict  # noqa: E402
+from sc_module_design.report_pdf import ExtraFigure, build_report  # noqa: E402
 from sc_module_design.layout import GROUP_SHAPES, ORIENTATIONS, PACKINGS  # noqa: E402
 from sc_module_design.selection import (C_SOURCES, ESR_SOURCES, GEOMETRY_MODES, THERMAL_MODES,  # noqa: E402
                                         coupling_factor, evaluate_candidate, layout_for, layout_pair,
@@ -44,7 +45,7 @@ from sc_module_design.selection import (C_SOURCES, ESR_SOURCES, GEOMETRY_MODES, 
 from sc_module_design import thermal_network as TN  # noqa: E402
 from sc_module_design.splits import REGISTRY, apply_split, get_split, load_plugins  # noqa: E402
 from sc_module_design.thermal import COUPLING_MODES, CURRENT_MODES, PROFILE_MODES, block_layout  # noqa: E402
-from sc_module_design.tradeoff import CRITERIA, WEIGHT_PRESETS, preset_weights, score  # noqa: E402
+from sc_module_design.tradeoff import ACTIVE_CRITERIA, CRITERIA, WEIGHT_PRESETS, preset_weights, score  # noqa: E402
 
 st.set_page_config(page_title="SC Module Designer", layout="wide", initial_sidebar_state="expanded")
 ui.apply_theme()
@@ -59,6 +60,77 @@ if "inp" not in st.session_state:
     st.session_state.inp = load_preset("thesis_characterized" if "thesis_characterized" in names else names[0])
     st.session_state.ver = 0
 inp: DesignInputs = st.session_state.inp
+
+# ---------------------------------------------------------------- presets: all settings, save and load
+# Design inputs live in `inp` (saved in the preset anyway). GUI-only settings (emulation, plot choices, thermal
+# measurement inputs) are widgets whose state Streamlit drops when their page is not shown. They are mirrored in
+# st.session_state["ui_mem"], saved as ui_state with the preset and put back into the widgets on every run.
+UI_KEEP = ("emu_", "mc_", "mcr_", "ni_", "meas_in", "meas_out", "net_tend")
+UI_KEEP_EXACT = ("px", "py")
+UI_SKIP = ("emu_csv_",)                 # download buttons cannot be set via the session state
+
+
+def _ui_key(base: str) -> bool:
+    return (base.startswith(UI_KEEP) or base in UI_KEEP_EXACT) and not base.startswith(UI_SKIP)
+
+
+def _simple(v) -> bool:
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return True
+    return isinstance(v, (list, tuple)) and all(isinstance(x, (bool, int, float, str)) for x in v)
+
+
+def capture_ui_state() -> dict:
+    """GUI-only settings: remembered values of earlier runs plus the widgets of the current page."""
+    suf = f"__v{st.session_state.get('ver', 0)}"
+    out = dict(st.session_state.get("ui_mem", {}))
+    for k, v in list(st.session_state.items()):
+        if isinstance(k, str) and k.endswith(suf) and _ui_key(k[: -len(suf)]) and _simple(v):
+            out[k[: -len(suf)]] = list(v) if isinstance(v, tuple) else v
+    return dict(sorted(out.items()))
+
+
+def recall_ui_state() -> None:
+    """Put remembered GUI settings back into widgets that Streamlit dropped (page not shown in the last run)."""
+    ver = st.session_state.get("ver", 0)
+    for base, v in st.session_state.get("ui_mem", {}).items():
+        key = f"{base}__v{ver}"
+        if key not in st.session_state:
+            st.session_state[key] = v
+
+
+def activate_inputs(new: DesignInputs, msg: str = "", drop_results: bool = True) -> None:
+    """Make new inputs active: fresh widget keys, its saved GUI settings, old emulation results dropped
+    (kept when the same design is only saved)."""
+    st.session_state.inp = new
+    st.session_state.ver = st.session_state.get("ver", 0) + 1
+    if drop_results:
+        for k in list(st.session_state.keys()):
+            if isinstance(k, str) and k.startswith(("emu_", "live_", "detail_")):
+                st.session_state.pop(k, None)
+    st.session_state["ui_mem"] = {k: v for k, v in (new.ui_state or {}).items()
+                                  if isinstance(k, str) and _ui_key(k) and _simple(v)}
+    recall_ui_state()
+    if msg:
+        st.session_state["flash"] = msg
+
+
+recall_ui_state()
+
+
+def safe_name(name: str) -> str:
+    """File name for preset and output folder: letters, digits, '-', '_' and '.' (spaces become '_')."""
+    s = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in (name or "").strip())
+    return s.strip("._")
+
+
+def save_preset(name: str) -> Path:
+    """Save the active inputs with all GUI settings as data/presets/<name>.yaml and keep them active."""
+    inp.name = name
+    inp.ui_state = capture_ui_state()
+    p = inp.to_yaml(PRESET_DIR / f"{name}.yaml")
+    activate_inputs(inp.copy(), drop_results=False)   # new widget keys: the name field shows the saved name
+    return p
 
 PAGES = [
     ("start", "Start und Überblick", []),
@@ -120,7 +192,7 @@ def compute():
         pkey = ("", 0.0)
     design_inp = inp.copy()
     design_inp.selected = {}          # selection does not change the computation
-    r = cached_design(yaml.safe_dump(design_inp.to_dict(), sort_keys=True), db_stamp(), pkey)
+    r = cached_design(yaml.safe_dump(design_inp.design_dict(), sort_keys=True), db_stamp(), pkey)
     r.inputs = inp                    # current selection for figures and tables
     st.session_state["last_status"] = flow_status(r)
     return r
@@ -220,25 +292,43 @@ with st.sidebar:
     psel = st.selectbox("Preset", presets, index=presets.index(inp.name) if inp.name in presets else 0,
                         help="iecon2023_legacy: exakt wie IECON 2023. thesis_datasheet: Datenblatt, korrigiert. "
                              "thesis_characterized: gemessene C0/k, ESR, Thermik.")
+    if inp.name not in presets:
+        st.caption(f"Aktiv: **{inp.name}** (nicht als Preset gespeichert)")
     if st.button("Preset laden", width="stretch", type="primary"):
-        st.session_state.inp = load_preset(psel)
-        st.session_state.ver = st.session_state.get("ver", 0) + 1
-        for k in list(st.session_state.keys()):
-            if k.startswith(("emu_", "live_", "detail_")):
-                st.session_state.pop(k, None)
+        activate_inputs(load_preset(psel), f"Preset {psel} geladen (mit allen gespeicherten Einstellungen).")
         st.rerun()
+    if st.session_state.get("flash"):
+        st.success(st.session_state.pop("flash"))
     if "nav" not in st.session_state:
         st.session_state["nav"] = "start"
     st.markdown("**Flussdiagramm** (Kasten anklicken)")
     flow_slot = st.empty()
     missing_slot = st.empty()
-    with st.expander("Design speichern"):
-        inp.name = st.text_input("Name", inp.name, key=W.key("name"))
-        if st.button("Als Preset speichern", width="stretch"):
-            p = inp.to_yaml(PRESET_DIR / f"{inp.name}.yaml")
-            st.success(f"Gespeichert: {p.relative_to(PROJECT_ROOT)}")
-        st.download_button("YAML herunterladen", yaml.safe_dump(inp.to_dict(), sort_keys=False, allow_unicode=True),
+    with st.expander("Preset speichern / laden"):
+        pname = safe_name(st.text_input("Name", inp.name, key=W.key("name")))
+        exists_ = bool(pname) and (PRESET_DIR / f"{pname}.yaml").exists()
+        over_ = st.checkbox(f"{pname} überschreiben", key=W.key("name_over")) if exists_ else True
+        if st.button("Als Preset speichern", width="stretch", disabled=not pname or not over_,
+                     help="Speichert alle Einstellungen, auch Emulation und Abbildungsauswahl."):
+            p = save_preset(pname)
+            st.session_state["flash"] = f"Gespeichert: {p.relative_to(PROJECT_ROOT)}"
+            st.rerun()
+        st.download_button("YAML herunterladen", yaml.safe_dump({**inp.to_dict(), "ui_state": capture_ui_state()},
+                                                                sort_keys=False, allow_unicode=True),
                            file_name=f"{inp.name}.yaml", width="stretch")
+        up = st.file_uploader("YAML laden", type=["yaml", "yml"], key="yaml_upload",
+                              help="Heruntergeladenes Preset laden. Es wird aktiv, aber nicht automatisch gespeichert.")
+        if up is not None:
+            digest = hash(up.getvalue())
+            if st.session_state.get("yaml_loaded") != digest:
+                try:
+                    new_ = DesignInputs.from_dict(yaml.safe_load(up.getvalue()))
+                except Exception as exc:
+                    st.error(f"Datei nicht lesbar: {exc}")
+                else:
+                    st.session_state["yaml_loaded"] = digest
+                    activate_inputs(new_, f"{up.name} geladen (nicht gespeichert).")
+                    st.rerun()
     if st.button("Cache leeren und neu rechnen", width="stretch"):
         cached_design.clear()
         st.rerun()
@@ -1124,12 +1214,14 @@ def page_tradeoff():
         base = preset_weights(o.weight_preset) or o.weights
         if o.weight_preset == "custom":
             c = st.columns(4)
-            for i, k in enumerate(CRITERIA):
+            for i, k in enumerate(ACTIVE_CRITERIA):      # "data" is switched off for now (tradeoff.py)
                 o.weights[k] = c[i % 4].slider(CRITERIA[k][2], 0.0, 3.0, float(o.weights.get(k, 1.0)), 0.25,
                                                key=W.key(f"w_{k}"))
             base = o.weights
         else:
-            st.caption("Gewichte: " + ", ".join(f"{CRITERIA[k][2]} {v:g}" for k, v in base.items() if v))
+            st.caption("Gewichte: " + ", ".join(f"{CRITERIA[k][2]} {v:g}" for k, v in base.items() if v)
+                       + ". Datenbasis (gemessen statt Datenblatt) zählt vorerst nicht, damit nicht "
+                         "charakterisierte Zellen nicht benachteiligt werden.")
     res = compute()
     for sk, df in res.candidates.items():
         sc = res.scenarios[sk]
@@ -1172,7 +1264,8 @@ def page_tradeoff():
         QN = {"cost_EUR": "Kosten", "volume_dm3": "Modulvolumen", "pcb_area_cm2": "Platinenfläche",
               "density_kg_dm3": "Moduldichte", "mass_kg": "Modulmasse", "rel_volume_dm3": "Volumen zur Referenz [%]",
               "rel_pcb_area_cm2": "Platinenfläche zur Referenz [%]", "rel_density_kg_dm3": "Dichte zur Referenz [%]",
-              "rel_mass_kg": "Masse zur Referenz [%]", "rel_cost_EUR": "Kosten zur Referenz [%]"}
+              "rel_mass_kg": "Masse zur Referenz [%]", "rel_cost_EUR": "Kosten zur Referenz [%]",
+              "n_cells": "Zellanzahl (S x P)", "module_height_mm": "Modulhöhe"}
         with st.container(border=True):
             q = list(QN)
             c = st.columns(5)
@@ -1271,13 +1364,11 @@ def page_tradeoff():
 
 
 def page_emulation():
-    ui.step_header("THERMISCHE SIMULATION", "Emulation: Prüfung des Moduls aus dem Flussdiagramm",
-                   "P und S bleiben wie in Schritt 5 bis 11, die Emulation ändert nichts. Das Profil läuft einmal ab "
-                   "U_C0inM (vorgeladen), Aufteilung wie in Schritt 2 (der Split lädt den SC nach, kein eigener "
-                   "Nachladeregler). Je Zeitschritt: Wandler-Wirkungsgrad, I aus P und Klemmenspannung U_C - R I, "
-                   "Stromgrenze I_C0max (darüber liefert die Batterie anteilig), Zelltemperatur mit demselben Modell "
-                   "wie Seite 6. Vereinfacht: ESR-Verluste erwärmen die Zellen, werden aber nicht von der SC-Energie "
-                   "abgezogen.")
+    ui.step_header("THERMISCHE SIMULATION", "Kontinuierliche Emulation des gewählten Moduls",
+                   "Das Moduldesign bleibt unverändert. Das Profil läuft mit kausaler periodischer "
+                   "Filterfortsetzung bis zum eingeschwungenen Zustand. Der Spannungs-PI aus Interleaved 6 "
+                   "lädt nach (±5 A Gesamtstrom); der innere Stromregler ist ideal. "
+                   "Positiver SC-Strom lädt, negativer entlädt. ESR-Verluste sind in der Energiebilanz enthalten.")
     res = compute()
     if res.profile is None or not res.candidates:
         st.info("Für die Emulation werden ein Lastprofil und Kandidaten benötigt.")
@@ -1286,6 +1377,7 @@ def page_emulation():
     with_sel = [k for k in keys_ if selected_cell(k)]
     sk = st.selectbox("Szenario", keys_, index=keys_.index(with_sel[-1]) if with_sel else len(keys_) - 1,
                       format_func=lambda s: SCENARIOS[s], key=W.key("emu_scen"))
+    sc = res.scenarios[sk]
     dfa = res.candidates[sk]
     opts = list(dfa[dfa.feasible].cell_id)
     sel = selected_cell(sk)
@@ -1300,22 +1392,31 @@ def page_emulation():
         cells = c[0].multiselect("Zellen (die gewählte zuerst, weitere zum Vergleich)", opts, default=[main],
                                  format_func=ui.short, key=W.key(f"emu_cells_{sk}_{main}"))
         c[1].caption(f"Verwendet: **{ui.short(main)}** ({src}). Weitere Zellen nur zum Vergleich.")
-        c = st.columns(5)
+        c = st.columns(4)
         eta_d = c[0].number_input("η Entladen [%]", 50.0, 100.0, float(inp.req.eta_dch * 100), 0.5,
                                   key=W.key("emu_etad"))
         eta_c = c[1].number_input("η Laden [%]", 50.0, 100.0, float(inp.req.eta_ch * 100), 0.5, key=W.key("emu_etac"))
-        eol = c[2].toggle("Prüfung am Lebensende", value=True, key=W.key("emu_eol"),
-                          help="C x L_EOL und ESR x 2. Das ist der Zustand, für den C_req ausgelegt ist.")
-        brk = c[3].toggle("Bremsereignis einfügen", value=sk == "profile_braking" and inp.braking.enabled,
-                          key=W.key("emu_brk"), help="Zum ungünstigsten Zeitpunkt (maximale SC-Energie).")
-        dtb = c[4].number_input("Zeitschritt [s]", 0.001, 0.1, 0.01, 0.001, format="%.3f", key=W.key("emu_dt"))
+        eol = True  # fixed EOL baseline; optional lifetime check replaces it below
+        c[2].caption("Standardprüfung: ESR ×2 und C × L_EOL")
+        # Emulate only the supplied profile; no synthetic braking event.
+        brk = False
+        dtb = c[3].number_input("Zeitschritt [s]", 0.001, 0.1, 0.01, 0.001, format="%.3f", key=W.key("emu_dt"))
+        vishay_only = bool(cells) and all("VISHAY" in cid.upper() for cid in cells)
+        curve_aging = vishay_only and st.toggle("Lebensdauer prüfen", value=False, key=W.key("emu_curve_aging"))
+        aging_state = bool(curve_aging)
+        if curve_aging:
+            eol = False
+            st.caption(f"Wunschlebensdauer: {inp.req.t_life_h:,.0f} h aus Schritt 1. "
+                       "R/R₀ = 1 + t/Lref; Lref aus Arrhenius. "
+                       "Kapazität linear bis zum vorhandenen L_EOL. "
+                       "Angeforderter SC-Strom über der Modulstromgrenze bedeutet: nicht erfüllt.")
         c = st.columns([1, 1.2, 1, 1.4])
         th_on = c[0].toggle("Thermik anzeigen", value=True, key=W.key("emu_th"),
                             help="Thermik-Abbildungen ein/aus. Gerechnet wird mit demselben Modell wie auf Seite 6 "
                                  "(Netzwerk, wenn auf der Startseite aktiv, sonst Blockmodell).")
         cons = c[1].toggle("Busspannung konservativ (U_Bus,min)", value=inp.req.U_bus_min_V is not None,
                            key=W.key("emu_cons"), help="Busströme mit der niedrigsten Bus-/Batteriespannung statt "
-                                                       "der nominalen U_Bus.")
+                                                       "der nominalen U_Bus. Nur die Stromabschätzung im Diagramm; der Wandler verwendet die tatsächliche Busspannung.")
         if cons:
             if inp.req.U_bus_min_V is None:
                 inp.req.U_bus_min_V = round(0.85 * inp.req.U_bus_V, 1)
@@ -1326,24 +1427,114 @@ def page_emulation():
         c[3].caption(f"Busströme mit U = {u_bus_used:g} V. Thermik: "
                      f"{'Netzwerk (heißeste Zelle)' if inp.opt.thermal_network else 'Blockmodell'}, ESR x "
                      f"{inp.opt.thermal_esr_factor:g} wie auf Seite 6.")
-    cfg_key = json.dumps(dict(sk=sk, cells=cells, eta=(eta_d, eta_c), eol=eol, brk=brk, dt=dtb, ub=u_bus_used,
-                              inp=yaml.safe_dump({**inp.to_dict(), "selected": {}}, sort_keys=True)), sort_keys=True)
+    c = st.columns(3)
+    uref = c[0].number_input("Spannungsreferenz [V]", float(sc.U_min), float(sc.U_max),
+                            float(sc.U_inM), step=0.1, key=W.key(f"emu_ref_{sk}"))
+    uinit = c[1].number_input("Anfangsspannung – nur erster Start [V]", float(sc.U_min), float(sc.U_max),
+                             float(sc.U_inM), step=0.1, key=W.key(f"emu_init_{sk}"))
+    show_power = c[2].toggle("Leistungsprüfung anzeigen", value=True, key=W.key("emu_power_check"))
+    with st.expander("Regelung und Moving Average"):
+        c = st.columns(2)
+        kp = c[0].number_input("Kp [A/V]", min_value=0.0, value=0.2, step=0.01, key=W.key("emu_pi_kp"))
+        ki = c[1].number_input("Ki [A/(V·s)]", min_value=0.0, value=0.5, step=0.01, key=W.key("emu_pi_ki"))
+        c = st.columns(2)
+        recharge = c[0].number_input("PI-Nachladegrenze [A]", min_value=0.1, max_value=10.0, value=5.0, step=0.5, key=W.key("emu_pi_positive"))
+        discharge = c[1].number_input("PI-Entladegrenze [A]", min_value=0.1, max_value=10.0, value=5.0, step=0.5, key=W.key("emu_pi_negative"))
+        c = st.columns(2)
+        fsw = c[0].number_input("Schaltfrequenz [kHz]", min_value=1.0, max_value=1000.0, value=100.0, step=10.0, key=W.key("emu_fsw"))
+        divider = c[1].number_input("PI-Aufruf alle N Schaltperioden", min_value=1, value=5, step=1, key=W.key("emu_pi_divider"))
+        ma_window = None
+        if inp.split.name == "moving_average":
+            ma_window = st.number_input("Moving-Average-Fenster [s] (nur Emulation)", min_value=0.1,
+                                        value=float(inp.split.params.get("window_s",20.0)), step=1.0, key=W.key("emu_ma_window"))
+        tune_labels = {"Aus": "off", "Nachladestrom bis 10 A": "charge"}
+        if ma_window is not None:
+            tune_labels["Nachladestrom und Moving Average"] = "both"
+        tune_mode = tune_labels[st.selectbox("Automatische Abstimmung", list(tune_labels), key=W.key("emu_auto_tune"))]
+        st.caption("Filter und PI bleiben unabhängig. Die Suche erhöht nur die positive PI-Grenze; "
+                   "bei Filterabstimmung werden zusätzlich kleinere Fenster geprüft. "
+                   "Kp, Ki, Entladegrenze und Moduldesign werden dabei nicht geändert.")
+    control_hz = fsw * 1000 / divider
+    st.caption(f"Spannungs-PI: Kp={kp:g} A/V, Ki={ki:g} A/(V·s), Korrektur −{discharge:g} bis +{recharge:g} A. "
+               f"Regler: {control_hz:g} Hz, Ts={1e6/control_hz:g} µs. "
+               "Ki wird mit dieser tatsächlichen Aufrufzeit integriert. Filter und PI wirken zusätzlich zueinander.")
+    controller_key = (kp,ki,recharge,discharge,fsw,divider,ma_window,tune_mode)
+    st.caption(f"Tatsächlicher Wandlerbus: {inp.req.U_bus_V:g} V; obere regelbare SC-Klemmenspannung: "
+               f"{0.98 * inp.req.U_bus_V:.2f} V (D_max = 0,98 aus Interleaved 6). "
+               "Stand: Busspannungsgrenze berücksichtigt.")
+    if uref > 0.98 * inp.req.U_bus_V:
+        ui.warn(f"Die Spannungsreferenz {uref:.2f} V ist bei {inp.req.U_bus_V:g} V Busspannung "
+                f"mit diesem Wandler nicht erreichbar (max. {0.98 * inp.req.U_bus_V:.2f} V). "
+                "Moduldesign und gespeicherte Anfangsenergie werden nicht automatisch geändert.")
+    cfg_key = json.dumps(dict(model_version="configurable-pi-tuning-v8", sk=sk, cells=cells, eta=(eta_d, eta_c), eol=eol, aging=aging_state, controller=controller_key, brk=brk, dt=dtb, ub=u_bus_used, uref=uref, uinit=uinit,
+                              inp=yaml.safe_dump({**inp.design_dict(), "selected": {}}, sort_keys=True)), sort_keys=True)
     if st.button("Emulation rechnen (Prüfung bei P aus Schritt 5)", type="primary"):
         out = {}
         with st.spinner("Emuliere ..."):
             for cid in cells:
-                cfg = EmulationConfig(dt_bin_s=dtb, soc_control=False, eta_dch=eta_d / 100, eta_ch=eta_c / 100,
-                                      U_conv_min_V=inp.req.U_conv_min_V, U_bus_V=u_bus_used)
-                out[cid] = emulation_design(res, sk, cid, cfg, check_eol=eol, include_braking=brk)
+                cfg = EmulationConfig(pi_kp=kp, pi_ki=ki, pi_min_A=-discharge, pi_max_A=recharge,
+                                      switching_frequency_Hz=fsw*1000, pi_every_pwm_cycles=int(divider),
+                                      dt_bin_s=dtb, voltage_reference_V=uref, initial_voltage_V=uinit,
+                                      eta_dch=eta_d / 100, eta_ch=eta_c / 100,
+                                      U_conv_min_V=inp.req.U_conv_min_V, U_bus_V=inp.req.U_bus_V)
+                from sc_module_design.tuning import run_tuned_emulation
+                out[cid] = run_tuned_emulation(res, sk, cid, cfg, eol, curve_aging,
+                                               ma_window, tune_mode, db)
         st.session_state["emu_result"] = (cfg_key, out)
+        st.session_state.pop("live_emu", None)
+        st.session_state.pop("live_buf", None)
     stored = st.session_state.get("emu_result")
     if not stored:
         st.info("Einstellungen prüfen und auf 'Emulation rechnen' klicken.")
         return
+    if any(getattr(d, "emulator", None) is None or
+           getattr(d.trace, "voltage_limited", None) is None for d in stored[1].values()):
+        st.session_state.pop("emu_result", None)
+        st.session_state.pop("live_emu", None)
+        st.session_state.pop("live_buf", None)
+        st.info("Emulationsmodell aktualisiert. Bitte neu rechnen; die Modulparameter bleiben erhalten.")
+        return
     if stored[0] != cfg_key:
-        ui.warn("Einstellungen geändert: Ergebnisse unten gehören zu den vorherigen Einstellungen. Neu rechnen.")
+        st.session_state.pop("emu_result", None)
+        st.session_state.pop("live_emu", None)
+        st.session_state.pop("live_buf", None)
+        ui.warn("Einstellungen geändert. Bitte neu rechnen, damit Busspannung und Kurven zu den aktuellen Einstellungen passen.")
+        return
     out = stored[1]
     sc = res.scenarios[sk]
+    for cid, d in out.items():
+        tuning = getattr(d, "tuning_report", None)
+        if tuning:
+            window_text = f" · Moving Average {tuning['window_s']:g} s" if tuning['window_s'] is not None else ""
+            st.caption(f"Verwendet · PI −{tuning['discharge_A']:g} bis +{tuning['recharge_A']:g} A" + window_text)
+            if tuning["mode"] != "off":
+                st.caption(f"{len(tuning['attempts'])} Varianten geprüft · "
+                           + ("Prüfung erfüllt." if tuning["matched"] else "Keine geprüfte Variante erfüllt alle Kriterien."))
+                with st.expander("Geprüfte Abstimmungen"):
+                    st.dataframe(pd.DataFrame(tuning["attempts"]), hide_index=True)
+        life = getattr(d, "lifetime_report", None)
+        if life:
+            st.markdown(f"**Lebensdauervergleich · {ui.short(cid)}**")
+            st.bar_chart(pd.DataFrame({"Stunden": [life["desired_h"], life["reference_h"], life["lower_h"]]},
+                                     index=["Wunsch", "Arrhenius", "Emulation: geprüft erreichbar"]))
+            delta = life["lower_h"] - life["desired_h"]
+            message = (f"Wunsch {'erfüllt' if life['target_passed'] else 'nicht erfüllt'} · "
+                       f"Abstand zum Wunsch: {delta:+,.0f} h · "
+                       f"geprüft erreichbar: {life['lower_h']:,.0f} h")
+            if not life["bol_passed"]:
+                message = ("Schon ungealtert nicht erfüllt: keine positive Lebensdauer nachgewiesen. "
+                           f"SC-Strombegrenzung aktiv: {life['current_limit_s']:.3f} s. "
+                           "Eine kürzere Lebensdauer allein behebt diesen Ausgangszustand nicht.")
+            (st.success if life["target_passed"] else st.warning)(message)
+            if life["voltage_V"] <= 2.2:
+                st.caption("Arrhenius-Schätzung unter 2,2 V/Zelle: Extrapolation außerhalb des im Vishay-Whitepaper angegebenen Spannungsbereichs.")
+            st.caption(f"Arrhenius mit eingestellter Zelltemperatur {life['temperature_C']:g} °C und "
+                       f"oberer Zellspannung {life['voltage_V']:.3f} V. Lineare Degradation ist eine Modellannahme. "
+                       f"Suchintervall: {life['lower_h']:,.0f}–{life['upper_h']:,.0f} h; "
+                       "Suche bis zum angenommenen EOL, monotone Verschlechterung vorausgesetzt. "
+                       f"Gezeigte Emulation bei {life['shown_h']:,.0f} h: ESR ×{life['esr_factor']:.3f}, "
+                       f"Restkapazität {100*life['capacity_factor']:.1f} %. "
+                       "Normale Batterieaufteilung ist erlaubt. Fehlerkriterium: angeforderter SC-Strom überschreitet die Modulstromgrenze.")
     rows = []
     for cid, d in out.items():
         last = d.iterations[-1]
@@ -1371,13 +1562,25 @@ def page_emulation():
         if not d.feasible:
             th_txt = ("" if inp.opt.thermal_adjust_P else " Thermik ignoriert, wird verbessert (Startseite).")
             ui.warn(f"{ui.short(cid)} {d.P_final}/{d.S}: {d.iterations[-1].reason}. P wird nicht geändert.{th_txt}")
-    st.latex(r"P_\mathrm{SC,Zelle}=\begin{cases}P_\mathrm{SC,Bus}/\eta_\mathrm{dch}\\P_\mathrm{SC,Bus}\,"
-             r"\eta_\mathrm{ch}\end{cases},\quad I_\mathrm{SC}=\frac{U_\mathrm{C}-\sqrt{U_\mathrm{C}^2-4RP_"
-             r"\mathrm{SC,Zelle}}}{2R}\le I_\mathrm{C0max},\quad \frac{\mathrm{d}E_\mathrm{SC}}{\mathrm{d}t}="
-             r"-P_\mathrm{SC,Zelle},\quad E_\mathrm{SC}(0)=\tfrac{1}{2}C\,U_\mathrm{C0inM}^2")
-    st.caption("Grenze ist der Strom des Wandlers I_C0max, darüber liefert die Batterie anteilig. An U_C0min hält die "
-               "Batterie die Spannung (liefert die fehlende Energie), der SC-Strom fließt weiter. ESR-Verluste nur "
-               "für die Erwärmung, nicht in der Energiebilanz (vereinfachte Annahme wie in der Auslegung).")
+    st.latex(r"U_\mathrm{Klemme}=U_C+R I_\mathrm{SC},\quad "
+             r"\frac{\mathrm{d}E}{\mathrm{d}t}=-P_\mathrm{SC,Klemme,out}-R I_\mathrm{SC,RMS}^2")
+    st.caption("I_SC > 0: Laden; I_SC < 0: Entladen. RMS ist immer nichtnegativ. "
+               "An den Spannungsgrenzen wird der tatsächliche SC-Strom begrenzt; "
+               "die Batterie übernimmt den nicht erfüllten Anteil. Es wird keine Energie künstlich erzeugt.")
+    if show_power:
+        with st.expander("Leistungsprüfung entlang des Profils", expanded=True):
+            st.latex(r"P_\mathrm{SC,angefordert}(t)\leq\frac{U_C(t)^2}{4R_\mathrm{Modul}}")
+            st.caption("Prüfung mit der momentanen internen Spannung, einschließlich Nachladeregelung. "
+                       "Die Modulkonfiguration wird durch diese Anzeige nicht verändert.")
+            for cid, d in out.items():
+                tr = d.trace
+                bad = tr.power_limited.astype(bool)
+                st.write(f"{ui.short(cid)}: R_Modul = {d.emulator.R_mod * 1000:.1f} mΩ; "
+                         f"Leistungsgrenze für {tr.dt[bad].sum():.3f} s überschritten.")
+                if bad.any():
+                    st.dataframe(pd.DataFrame({"Zeit [s]": tr.t[bad] - tr.t[0],
+                        "U intern [V]": tr.U_sc[bad], "Angefordert max im Bin [W]": tr.P_required[bad],
+                        "Theoretische Grenze [W]": tr.P_available[bad]}), hide_index=True)
     for cid, d in out.items():
         with st.expander(f"{ui.short(cid)}: emuliertes Profil und Rechnung", expanded=cid == cells[0]):
             for n in d.notes:
@@ -1403,19 +1606,19 @@ def page_emulation():
                 st.caption(f"Abgleich bei P = {it0.P} (analytisch): Seite 6 Netzwerk {ui.fmt(ref_net, 1, 'K')}, Block "
                            f"{ui.fmt(trow.dT_max_K, 1, 'K')} | Emulation Netzwerk {ui.fmt(it0.dT_net_max_K, 1, 'K')}, "
                            f"Block {ui.fmt(it0.dT_block_max_K, 1, 'K')}. Unterschied nur durch den emulierten "
-                           f"Strom (Spannungsverlauf, kein SC-Strom an U_C0min).")
+                           f"Strom einschließlich Nachladen, Grenzbegrenzung und periodischer Filterfortsetzung.")
             ui.show_fig(pl.fig_emulated_profile(d.trace, d.module, sc, i_limit=d.module.I_max_A,
                                                 u_conv_min=inp.req.U_conv_min_V, u_bus=inp.req.U_bus_V,
-                                                u_bus_used=u_bus_used, thermal=th_on, net=d.net),
+                                                u_bus_used=u_bus_used, thermal=th_on, net=d.net,
+                                                converter_max_V=d.emulator.cfg.converter_max_duty * d.emulator.cfg.U_bus_V,
+                                                battery_reference_W=d.emulator.bat.mean),
                         f"emulated_profile_{cid}_{d.P_final}", plt_module=pl.plt,
-                        fx_keys=["eta", "I_sc", "P_limit", "U_lim", "U_term", "th_first"])
+                        fx_keys=["eta", "emu_I_sc", "P_limit", "U_lim", "emu_PI", "th_first"])
             if d.chain is not None and th_on:
                 ch = d.chain
                 st.markdown("**Zelltemperatur aus dem Zellstrom** (volle Auflösung, je Zeitschritt)")
-                st.latex(r"P_\mathrm{Bus}=U_\mathrm{Bus}I_\mathrm{Bus}=U_\mathrm{SC}I_\mathrm{SC},\quad "
-                         r"U_\mathrm{SC}=U_\mathrm{C}-R_\mathrm{ESR}I_\mathrm{SC}\;\Rightarrow\;"
-                         r"I_\mathrm{SC}=\frac{U_\mathrm{C}-\sqrt{U_\mathrm{C}^2-4R_\mathrm{ESR}P}}{2R_\mathrm{ESR}},"
-                         r"\quad P\le\frac{U_\mathrm{C}^2}{4R_\mathrm{ESR}}")
+                st.latex(r"U_\mathrm{Klemme}=U_C+R_\mathrm{ESR}I_\mathrm{SC},\quad "
+                         r"P_\mathrm{SC,Klemme,out}=-U_\mathrm{Klemme}I_\mathrm{SC}")
                 st.latex(r"i_\mathrm{Zelle}=\frac{I_\mathrm{SC}}{P},\quad p_\mathrm{v}(t)=i_\mathrm{Zelle}^2(t)\,"
                          r"R_\mathrm{ESR,Zelle},\quad C_\mathrm{th}\frac{\mathrm{d}\Delta T}{\mathrm{d}t}="
                          r"p_\mathrm{v}-\frac{\Delta T}{R_\mathrm{th,eff}}")
@@ -1430,7 +1633,7 @@ def page_emulation():
                            f"{d.module.R_th:.1f} K/W = {ch['I_rms'] ** 2 * d.R_esr_cell_used * d.module.R_th:.1f} K "
                            f"(Mittelwert), Maximum durch die Welligkeit {ch['dT_max']:.1f} K.")
                 ui.show_fig(pl.fig_cell_thermal_chain(ch, inp.req.dT_max_K), f"cell_thermal_chain_{cid}_{d.P_final}",
-                            plt_module=pl.plt, fx_keys=["I_sc", "th_first", "R_th_eff", "esr_eol"])
+                            plt_module=pl.plt, fx_keys=["emu_I_sc", "th_first", "R_th_eff", "esr_eol"])
                 if d.net is not None:
                     nt = d.net
                     st.markdown(f"**Netzwerk (wie Seite 6) mit dem emulierten Verlustprofil**, P = {d.P_final}: "
@@ -1443,6 +1646,10 @@ def page_emulation():
                     ui.show_fig(pl.fig_network_heatmap(nt["steady"], extent=layout_extent(res)),
                                 f"emu_network_{ui.short(cid).replace(' ', '_')}_{d.P_final}", plt_module=pl.plt,
                                 fx_keys=["net", "R_gap", "Q_rad"])
+            st.caption(f"Einschwingen: {len(d.history)} Profilperioden; "
+                       f"{'konvergiert' if d.converged else 'noch nicht konvergiert'}. "
+                       f"Start der gezeigten Periode: {d.history[-1].U_start:.3f} V, "
+                       f"Ende: {d.history[-1].U_end:.3f} V.")
             pts = d.study or d.iterations
             st.markdown(f"**Thermik des Moduls über P** (nur Anzeige, das Modul bleibt P = {d.P_final})")
             ui.show_fig(pl.fig_emudesign(pts, inp.req.dT_max_K, P_used=d.P_final), f"emudesign_{cid}",
@@ -1452,9 +1659,15 @@ def page_emulation():
                            + f" (Grenze {inp.req.dT_max_K:g} K, {'Netzwerk' if inp.opt.thermal_network else 'Block'}).")
             csv = io.StringIO()
             pd.DataFrame({"t_s": d.trace.t - d.trace.t[0], "P_load_W": d.trace.P_load, "P_bat_W": d.trace.P_bat,
-                          "P_sc_bus_W": d.trace.P_sc, "P_sc_cell_W": d.trace.P_sc_cell, "I_sc_A": d.trace.I_sc,
+                          "P_sc_bus_W": d.trace.P_sc, "P_sc_terminal_out_W": d.trace.P_sc_cell, "I_sc_A": d.trace.I_sc,
                           "I_sc_rms_A": d.trace.I_sc_rms, "U_sc_V": d.trace.U_sc, "E_sc_J": d.trace.E_sc,
-                          "dT_K": d.trace.dT}).to_csv(csv, index=False)
+                          "dT_K": d.trace.dT, "U_terminal_V": d.trace.U_term,
+                          "I_PI_A": d.trace.I_pi, "PI_integral_A": d.trace.pi_integral,
+                          "U_terminal_peak_V": d.trace.U_term_peak,
+                          "bus_voltage_limited": d.trace.voltage_limited,
+                          "converter_range_violation": d.trace.converter_range_violation,
+                          "dt_s": d.trace.dt, "P_required_max_W": d.trace.P_required,
+                          "P_available_W": d.trace.P_available}).to_csv(csv, index=False)
             st.download_button("Emuliertes Profil als CSV", csv.getvalue(), file_name=f"emulated_{cid}.csv",
                                key=W.key(f"emu_csv_{cid}"))
     live_section(out[cells[0]], sc)
@@ -1463,7 +1676,8 @@ def page_emulation():
 
 def live_section(d, sc):
     st.markdown("#### Live-Ansicht (Endlosschleife)")
-    st.caption("Profil wiederholt, Aufteilung wie Schritt 2, kein Nachladeregler.")
+    st.caption("Fortsetzung des berechneten Zustands mit identischem PI, ESR, Profil und Lebensdauerzustand. "
+               "Energie, PI-Integrator und Profilposition bleiben erhalten.")
     prof = compute().profile
     res = compute()
     c = st.columns(4)
@@ -1474,10 +1688,7 @@ def live_section(d, sc):
         st.session_state.pop("live_emu", None)
         st.session_state.pop("live_buf", None)
     if live and "live_emu" not in st.session_state:
-        em = HESSEmulator(prof.t, prof.p, res.p_bat, d.module,
-                          EmulationConfig(eta_dch=inp.req.eta_dch, eta_ch=inp.req.eta_ch, soc_control=False))
-        if d.chain:
-            em.dT = float(d.chain["dT0"])          # start in the thermal periodic steady state
+        em = copy.deepcopy(d.emulator)
         st.session_state["live_emu"] = em
         st.session_state["live_buf"] = None
 
@@ -1487,7 +1698,7 @@ def live_section(d, sc):
             st.caption("Gestoppt.")
             return
         tr = em._advance(max(1, int(round(st.session_state.get("live_speed", 5) / em.dt))))
-        new = np.vstack([tr.t, tr.P_load, tr.P_bat, tr.P_sc, tr.U_sc, tr.dT, tr.I_sc])
+        new = np.vstack([tr.t, tr.P_load, tr.P_bat, tr.P_sc, tr.U_sc, tr.dT, tr.I_sc, tr.U_term])
         buf = st.session_state.get("live_buf")
         buf = new if buf is None else np.hstack([buf, new])
         buf = buf[:, buf[0] >= buf[0, -1] - st.session_state.get("live_win", 60)]
@@ -1496,8 +1707,11 @@ def live_section(d, sc):
         f.add_trace(go.Scattergl(x=buf[0], y=buf[1], name="Last", line=dict(color="#999", width=1)), 1, 1)
         f.add_trace(go.Scattergl(x=buf[0], y=buf[2], name="Batterie", line=dict(color=COLORS[1], width=2)), 1, 1)
         f.add_trace(go.Scattergl(x=buf[0], y=buf[3], name="Supercap", line=dict(color=COLORS[0], width=1)), 1, 1)
-        f.add_trace(go.Scattergl(x=buf[0], y=buf[6], name="I_SC", line=dict(color=COLORS[0], width=1)), 2, 1)
+        f.add_trace(go.Scattergl(x=buf[0], y=buf[6], name="I_SC (+ Laden / − Entladen)", line=dict(color=COLORS[0], width=1)), 2, 1)
         f.add_trace(go.Scattergl(x=buf[0], y=buf[4], name="U_SC", line=dict(color=COLORS[0])), 3, 1)
+        f.add_trace(go.Scattergl(x=buf[0], y=buf[7], name="U_Klemme", line=dict(color=COLORS[2])), 3, 1)
+        f.add_hline(y=em.cfg.U_bus_V, line_dash="dot", row=3, col=1)
+        f.add_hline(y=em.cfg.converter_max_duty * em.cfg.U_bus_V, line_dash="dash", row=3, col=1)
         f.add_hline(y=em.m.U_min, line_dash="dash", row=3, col=1)
         f.add_hline(y=em.m.U_max, line_dash="dash", row=3, col=1)
         f.add_trace(go.Scattergl(x=buf[0], y=buf[5], name="ΔT", line=dict(color=COLORS[2])), 4, 1)
@@ -1641,17 +1855,74 @@ def page_db():
     nav_buttons("db")
 
 
+def _emulation_extras(res) -> list:
+    """Emulation figures of the last run on the emulation page (if any) for the report."""
+    stored = st.session_state.get("emu_result")
+    if not stored:
+        return []
+    out = []
+    for cid, d in stored[1].items():
+        try:
+            sc = res.scenarios[d.scenario]
+            fig = pl.fig_emulated_profile(d.trace, d.module, sc, i_limit=d.module.I_max_A,
+                                          u_conv_min=inp.req.U_conv_min_V, u_bus=inp.req.U_bus_V, thermal=True,
+                                          net=d.net, converter_max_V=d.emulator.cfg.converter_max_duty * d.emulator.cfg.U_bus_V,
+                                          battery_reference_W=d.emulator.bat.mean)
+            h = d.history[-1]
+            rows = [("Cell, setup", f"{ui.short(cid)}, P/S = {d.P_final}/{d.S}"),
+                    ("Check passed", "yes" if d.feasible else "no"),
+                    ("U_C min / max in the cycle", f"{h.U_min:.2f} / {h.U_max:.2f} V"),
+                    ("SC current RMS / peak", f"{h.I_sc_rms_A:.1f} / {h.I_sc_peak_A:.1f} A"),
+                    ("Time at the current limit I_C0max", f"{h.t_current_limit_s:.2f} s"),
+                    ("Energy taken over by the battery", f"{h.E_overflow_J:.0f} J"),
+                    ("Max. temperature rise", f"{h.dT_max:.1f} K")]
+            lr = getattr(d, "lifetime_report", None)
+            if lr:
+                rows.append(("Lifetime check", f"desired {lr['desired_h']:.0f} h, reference {lr['reference_h']:.0f} h, "
+                                               f"verified {lr['lower_h']:.0f} h"))
+            mod = {"profile": "Module 1", "profile_braking": "Module 2"}.get(d.scenario, d.scenario)
+            out.append(ExtraFigure(f"emulation_{d.scenario}_{cid}", f"{mod}: emulated operation (last run on the "
+                                   "emulation page), check of the module with the flowchart P; simplified model, "
+                                   "not validated.", fig, rows))
+        except Exception:
+            continue
+    return out
+
+
 def page_export():
-    ui.step_header("EXPORT", "Ergebnisse und Abbildungen",
-                   "Schreibt alles nach outputs/: Eingaben, Zusammenfassung, Kandidaten, LaTeX-Tabelle, Abbildungen.")
+    ui.step_header("EXPORT", "Preset, Ergebnisse, Abbildungen und Bericht",
+                   "Speichert das Preset mit allen Einstellungen und schreibt alles nach outputs/<Name>/: Eingaben, "
+                   "Zusammenfassung, Kandidaten, LaTeX-Tabelle, Abbildungen (8 / 16 cm) und den Bericht als PDF.")
     res = compute()
-    out_name = st.text_input("Ordner unter outputs/", f"{inp.name}", key="out_name")
-    figs = st.checkbox("Abbildungen (PDF/SVG/PNG, Diss-Stil)", value=True, key="out_figs")
-    if st.button("Exportieren", type="primary"):
+    name = safe_name(st.text_input("Name (Preset und Ordner unter outputs/)", value="", key="out_name",
+                                   placeholder="z. B. roboterarm_50F_v2"))
+    c = st.columns(2)
+    figs = c[0].checkbox("Abbildungen (PDF/SVG/PNG, Diss-Stil)", value=True, key="out_figs")
+    rep_on = c[1].checkbox("Bericht als PDF (Englisch)", value=True, key="out_report",
+                           help="Eingaben, Schritte, je Modul höchstens drei Kandidaten, Modulvergleich, Layout, "
+                                "alle Abbildungen; Emulation, falls auf der Emulationsseite gerechnet.")
+    over = True
+    if name and (PRESET_DIR / f"{name}.yaml").exists():
+        over = st.checkbox(f"Preset {name} existiert schon: überschreiben", value=False, key="out_overwrite")
+    if not name:
+        st.caption("Ohne Namen kein Export. Der Name gilt für das Preset und den Ordner.")
+    if st.button("Exportieren", type="primary", disabled=not name or not over):
         with st.spinner("Exportiere ..."):
-            out = export_run(res, PROJECT_ROOT / "outputs" / out_name, figures=figs, db=db)
-        st.success(f"Geschrieben nach {out.relative_to(PROJECT_ROOT)}")
-        st.write(sorted(str(p.relative_to(out)) for p in out.rglob("*") if p.is_file()))
+            extras = _emulation_extras(res) if rep_on else []
+            p = save_preset(name)
+            res.inputs = st.session_state.inp
+            out = export_run(res, PROJECT_ROOT / "outputs" / name, figures=figs, db=db)
+            msg = f"Preset {p.relative_to(PROJECT_ROOT)} gespeichert, Ergebnisse in {out.relative_to(PROJECT_ROOT)}"
+            if rep_on:
+                pdf, engine = build_report(res, out, db=db, extra=extras)
+                msg += f", Bericht {pdf.name}" + ("" if engine == "latex" else " (ohne LaTeX, einfaches Layout)")
+                st.session_state["export_pdf"] = str(pdf)
+        st.session_state["flash"] = msg + "."
+        st.rerun()
+    pdf = st.session_state.get("export_pdf")
+    if pdf and Path(pdf).exists():
+        st.download_button("Bericht (PDF) herunterladen", Path(pdf).read_bytes(), file_name=Path(pdf).name,
+                           mime="application/pdf")
     c = st.columns(3)
     c[0].download_button("summary.json", json.dumps(summary_dict(res), indent=2, ensure_ascii=False),
                          file_name=f"{inp.name}_summary.json")
@@ -1715,3 +1986,4 @@ with missing_slot.container():
             st.markdown(f"<div style='color:#b71c1c;font-size:.85rem;margin:2px 0'>■ {m}</div>",
                         unsafe_allow_html=True)
 PAGE_FUNCS[page]()
+st.session_state["ui_mem"] = capture_ui_state()   # GUI-only settings survive page changes and go into presets

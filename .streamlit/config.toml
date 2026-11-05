@@ -1,3 +1,7 @@
+[global]
+# presets restore widget values via the session state (no duplicate-value warning)
+disableWidgetStateDuplicationWarning = true
+
 [browser]
 gatherUsageStats = false
 

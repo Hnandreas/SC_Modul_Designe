@@ -151,38 +151,52 @@ def export_run(res, out_dir: Optional[str | Path] = None, figures: bool = True, 
         lines += ["", "## Warnings", ""] + [f"- {w}" for w in res.warnings]
     (out / "summary.md").write_text("\n".join(lines), encoding="utf8")
     if figures:
-        fdir = out / "figures"
-        figs = {}
-        figs["dischargeratio"] = pl.fig_discharge_ratio(res) if res.voltages else None
-        if res.scenarios:
-            figs["voltage_levels"] = pl.fig_voltage_levels(res)
-        if res.series_info:
-            figs["lifetime_SC"] = pl.fig_lifetime(res, db)
-        if res.profile is not None:
-            figs["power_profile"] = pl.fig_profile(res)
-            figs["power_peaks"] = pl.fig_peaks(res)
-            figs["fft"] = pl.fig_fft(res)
-            legacy = res.inputs.opt.energy_method == "zero_crossing_legacy" and res.inputs.split.params.get(
-                "alignment") == "legacy_matlab"
-            figs["energy_excursions"] = pl.fig_energy_excursions(res, "iecon" if legacy else "auto")
-        if res.candidates:
-            figs["Modules_Cells"] = pl.fig_tradeoff(res, scenarios=tuple(res.candidates))
-            if res.inputs.opt.geometry == "pcb":
-                from .selection import layout_pair
-                for sk, sel in (res.inputs.selected or {}).items():
-                    df = res.candidates.get(sk)
-                    if df is None or sel.get("cell_id") not in set(df.cell_id):
-                        continue
-                    row = df[df.cell_id == sel["cell_id"]].iloc[0]
-                    P = int(row.P)                  # P from the flowchart (the emulation only checks)
-                    cell = db.cell(row.cell_id)
-                    sq, hx = layout_pair(cell, int(row.S), P, res.inputs.opt, res.inputs.req)
-                    if sq is not None:
-                        m_cells = int(row.S) * P * float(cell["mass_g"]) / 1000
-                        figs[f"layout_{sk}"] = pl.fig_layout_compare(sq, hx, m_cells,
-                                                                      res.inputs.opt.pcb_areal_mass_g_cm2)
-        for name, fig in figs.items():
-            if fig is not None:
-                pl.save_fig(fig, fdir / name)
-                pl.plt.close(fig)
+        save_standard_figures(res, out / "figures", db)
     return out
+
+
+def standard_figures(res, db: Optional[Database] = None) -> dict:
+    """The thesis figures of a design run (name -> Figure or None)."""
+    db = db or get_database()
+    figs = {}
+    figs["dischargeratio"] = pl.fig_discharge_ratio(res) if res.voltages else None
+    if res.scenarios:
+        figs["voltage_levels"] = pl.fig_voltage_levels(res)
+    if res.series_info:
+        figs["lifetime_SC"] = pl.fig_lifetime(res, db)
+    if res.profile is not None:
+        figs["power_profile"] = pl.fig_profile(res)
+        figs["power_peaks"] = pl.fig_peaks(res)
+        figs["fft"] = pl.fig_fft(res)
+        legacy = res.inputs.opt.energy_method == "zero_crossing_legacy" and res.inputs.split.params.get(
+            "alignment") == "legacy_matlab"
+        figs["energy_excursions"] = pl.fig_energy_excursions(res, "iecon" if legacy else "auto")
+    if res.candidates:
+        figs["Modules_Cells"] = pl.fig_tradeoff(res, scenarios=tuple(res.candidates))
+        if res.inputs.opt.geometry == "pcb":
+            from .selection import layout_pair
+            for sk, sel in (res.inputs.selected or {}).items():
+                df = res.candidates.get(sk)
+                if df is None or sel.get("cell_id") not in set(df.cell_id):
+                    continue
+                row = df[df.cell_id == sel["cell_id"]].iloc[0]
+                P = int(row.P)                  # P from the flowchart (the emulation only checks)
+                cell = db.cell(row.cell_id)
+                sq, hx = layout_pair(cell, int(row.S), P, res.inputs.opt, res.inputs.req)
+                if sq is not None:
+                    m_cells = int(row.S) * P * float(cell["mass_g"]) / 1000
+                    figs[f"layout_{sk}"] = pl.fig_layout_compare(sq, hx, m_cells,
+                                                                  res.inputs.opt.pcb_areal_mass_g_cm2)
+    return figs
+
+
+def save_standard_figures(res, fdir: str | Path, db: Optional[Database] = None) -> list[str]:
+    """Save all standard figures as PDF/SVG/PNG (exactly 8 / 16 cm wide) and return their names."""
+    fdir = Path(fdir)
+    names = []
+    for name, fig in standard_figures(res, db).items():
+        if fig is not None:
+            pl.save_fig(fig, fdir / name)
+            pl.plt.close(fig)
+            names.append(name)
+    return names

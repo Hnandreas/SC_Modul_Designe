@@ -1,17 +1,9 @@
-"""Emulation check of the module from the flowchart (step 14).
+"""Continuous, PI-controlled emulation check of the existing module (step 14).
 
-The analytic procedure (steps 1 to 11) gives S and P. The emulation runs the load profile once from the precharged
-state U_C0inM with the split of step 2 (e.g. moving average, it recharges the SC; no extra recharge controller) and
-checks this module, P is NOT changed:
-
-    per time step: converter efficiency, I = P/U with the ESR drop, ESR losses, converter current limit I_C0max
-    (the limit: above it the battery delivers the rest proportionally), at U_C0min / U_C0max the voltage is held and
-    the battery delivers / takes the energy while the SC current keeps flowing, cell temperature from the emulated
-    cell current (same thermal model as step 7 to 10, periodic state of the repeated profile).
-
-Reported (information, no failure): time at U_C0min / U_C0max and at I_C0max, energy taken over by the battery,
-ESR losses, cell RMS current. Red hint: dT above the limit (block and network). The check runs at end of life by default (C x L_EOL, ESR x factor).
-increase_P=True keeps the old iterative study (P increased until all checks pass); it is not used by the GUI.
+S/P and all analytic sizing inputs are retained. Profiles repeat with periodic
+filter continuation; energy, PI and thermal states continue across periods.
+Voltage limits curtail actual SC current; ESR losses always reduce stored energy.
+The explicit increase_P study remains opt-in and is not used by the GUI.
 """
 from __future__ import annotations
 
@@ -25,6 +17,7 @@ from . import equations as eq
 from .database import Database, _isnan, get_database
 from .emulation import CycleTrace, EmulationConfig, HESSEmulator, ModuleModel
 from .selection import coupling_factor, layout_for, network_params
+from .splits import periodic_emulation_split
 from .thermal import cell_loss_lowpass
 from . import thermal_network as TN
 
@@ -76,6 +69,8 @@ class EmuDesign:
     braking_at_s: Optional[float] = None
     notes: list = field(default_factory=list)
     info: list = field(default_factory=list)  # hints that are no failure (U at U_C0min, current limit)
+    emulator: Optional[HESSEmulator] = None
+    converged: bool = False
     study: list = field(default_factory=list)  # dT over P for the display (P_final unchanged)
 
 
@@ -104,16 +99,14 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
                      check_eol: bool = True, include_braking: Optional[bool] = None,
                      braking_at_s: Optional[float] = None, max_iter: int = 40,
                      db: Optional[Database] = None, P: Optional[int] = None, increase_P: bool = False,
-                     single_pass: bool = True, I_C0max: Optional[float] = None,
-                     thermal_study: int = 6) -> EmuDesign:
+                     single_pass: bool = False, I_C0max: Optional[float] = None,
+                     thermal_study: int = 0) -> EmuDesign:
     """Emulation check of a configuration.
 
     Default: the module of step 5 (P from the flowchart, or P given) is only checked, P is NOT changed.
-    single_pass: the profile runs once from the precharged state U_C0inM (the split recharges the SC; with the
-    legacy moving average the edge windows need the precharge energy). increase_P=True runs the old
-    iterative study (P is increased until all checks pass), only on explicit request.
-    thermal_study: if dT is above the limit, the same emulation is evaluated for P + 1, P + 2, ... (at most this
-    many) until dT <= dT_max, only for the display dT over P (out.study); P_final stays P.
+    Default: carry energy and PI state across repeated periods until periodic.
+    single_pass=True is an explicitly requested startup study, not the GUI default.
+    thermal_study is opt-in and never changes the selected module.
     """
     db = db or get_database()
     inp, req, opt = res.inputs, res.inputs.req, res.inputs.opt
@@ -130,11 +123,15 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
     cfg.eol = check_eol
     cfg.L_EOL = req.L_EOL
     prof = res.profile
-    t, p_load, p_bat = prof.t, prof.p, res.p_bat
+    t, p_load = prof.t, prof.p
+    p_bat, _ = periodic_emulation_split(inp.split.name, t, p_load, inp.split.params)
     P0 = int(P) if P else int(row["P"])
     out = EmuDesign(cell_id, scenario, S, P0, P0, False)
+    if inp.split.name in ("moving_average", "lowpass_1st", "butterworth", "rate_limiter"):
+        out.notes.append("Emulation: kausale periodische Filterfortsetzung ohne Rand-Resets; "
+                         "die analytische Auslegung und ihre Referenzaufteilung bleiben unverändert.")
     if include_braking is None:
-        include_braking = scenario == "profile_braking" and inp.braking.enabled
+        include_braking = False  # Synthetic events require an explicit API request.
     if include_braking:
         if braking_at_s is None:
             em0 = HESSEmulator(t, p_load, p_bat, _module(row, cell, sc, P0, req, opt, i_lim), cfg)
@@ -148,7 +145,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
     P = P0
     seen = set()
     study_mode = False
-    L = req.L_EOL if check_eol else 1.0
+    L = cfg.aging_capacity_factor if cfg.aging_capacity_factor is not None else (req.L_EOL if check_eol else 1.0)
     for _ in range(max_iter):
         mod = _module(row, cell, sc, P, req, opt, i_lim)
         em = HESSEmulator(t, p_load, p_bat, mod, cfg)
@@ -168,7 +165,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         netr = None
         if mod.R_th is not None:
             # same loss assumption as the thermal page: ESR x thermal_esr_factor
-            r_esr = mod.R_cell_Ohm * opt.thermal_esr_factor
+            r_esr = em.R_cell_eff
             i_cell = em.cell_current_full(tr, p_load, p_bat, prof.dt)
             chain = cell_loss_lowpass(i_cell, prof.dt, r_esr, mod.R_th, mod.C_th, periodic=True)
             chain["t"] = np.arange(len(i_cell)) * prof.dt
@@ -184,6 +181,8 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         dT_net = netr["dT_max"] if netr else float("nan")
         dTm = dT_net if netr else dT_block
         reasons = []
+        if not single_pass and not em.converged:
+            reasons.append("Periodischer Zustand bei maximaler Zykluszahl nicht erreicht")
         if increase_P and last.t_at_Umin_s > 0:
             reasons.append(f"U_C0min {last.t_at_Umin_s:.2f} s erreicht")
         if increase_P and last.t_at_Umax_s > 0:
@@ -194,13 +193,23 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
             reasons.append(f"P < P_I,emu = {P_I_emu}")
         # current limit I_C0max (hard) and power limit U_C^2/(4R): the SC delivers what it can, the battery the
         # rest (overflow). Reported, but not a reason to increase P.
+        if em.U_reference > cfg.converter_max_duty * cfg.U_bus_V + 1e-9:
+            reasons.append(f"Spannungsreferenz {em.U_reference:.2f} V bei U_Bus={cfg.U_bus_V:g} V "
+                           f"nicht erreichbar (Wandlergrenze {cfg.converter_max_duty * cfg.U_bus_V:.2f} V)")
+        if last.t_converter_range_s > 0:
+            reasons.append(f"SC-Klemmenspannung oberhalb des regelbaren Wandlerbereichs "
+                           f"({cfg.converter_max_duty * cfg.U_bus_V:g} V) für {last.t_converter_range_s:.2f} s")
         if last.t_Uconv_min_s > 0:
             reasons.append(f"Klemmenspannung < U_Wandler,min = {cfg.U_conv_min_V:g} V für {last.t_Uconv_min_s:.2f} s")
         if dTm == dTm and dTm > req.dT_max_K:
             reasons.append(f"dT = {dTm:.1f} K > {req.dT_max_K:g} K" + (" (Netzwerk, heißeste Zelle)" if netr else ""))
         info = []
+        if last.t_bus_voltage_limit_s > 0:
+            info.append(f"Ladestrom für {last.t_bus_voltage_limit_s:.2f} s durch "
+                        f"Wandler-Spannungsreserve begrenzt (D_max={cfg.converter_max_duty:g}, "
+                        f"U_Bus={cfg.U_bus_V:g} V); Batterie übernimmt den Rest")
         if last.t_at_Umin_s > 0:
-            info.append(f"an U_C0min {last.t_at_Umin_s:.2f} s, Batterie liefert die Energie, SC-Strom fließt weiter")
+            info.append(f"an U_C0min {last.t_at_Umin_s:.2f} s, SC-Entladung wird begrenzt, Batterie übernimmt den fehlenden Anteil")
         if last.t_current_limit_s > 0:
             info.append(f"an I_C0max = {i_lim:g} A {last.t_current_limit_s:.2f} s, Batterie übernimmt anteilig")
         if last.t_at_Umax_s > 0:
@@ -225,6 +234,7 @@ def emulation_design(res, scenario: str, cell_id: str, cfg: Optional[EmulationCo
         out.info = info
         out.iterations.append(it)
         out.trace, out.history, out.module, out.chain, out.net = tr, hist, mod, chain, netr
+        out.emulator, out.converged = em, em.converged
         if ok or not increase_P:
             out.P_final, out.feasible = P, ok
             if not increase_P and thermal_study > 0 and dTm == dTm and dTm > req.dT_max_K and P < opt.P_limit:

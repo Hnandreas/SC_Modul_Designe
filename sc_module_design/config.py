@@ -124,7 +124,7 @@ class Options:
     weight_preset: str = "balanced"
     weights: dict = field(default_factory=lambda: {
         "cost": 1.0, "mass": 1.0, "volume": 1.0, "losses": 1.0, "thermal": 1.0, "cells": 1.0,
-        "reserve": 1.0, "data": 1.0})
+        "reserve": 1.0, "data": 0.0})                  # "data" switched off for now (tradeoff.DISABLED_CRITERIA)
     reserve_cap: float = 0.3                       # capacity reserve above this gives no extra benefit
     # ESR losses during discharge in the capacity sizing (from the steady-state current trajectory)
     include_esr_losses: bool = True
@@ -153,10 +153,19 @@ class DesignInputs:
     opt: Options = field(default_factory=Options)
     selected: dict = field(default_factory=dict)   # scenario -> {cell_id, P} final choice
     reference: dict = field(default_factory=dict)  # expected values for comparison (optional)
+    # GUI settings that are not design inputs (emulation, plot choices); saved with the preset, restored on load
+    ui_state: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------------ yaml
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def design_dict(self) -> dict:
+        """Inputs that change the computation (without name, description and GUI settings), e.g. as cache key."""
+        d = asdict(self)
+        for k in ("ui_state", "name", "description"):
+            d.pop(k, None)
+        return d
 
     def copy(self) -> "DesignInputs":
         return copy.deepcopy(self)

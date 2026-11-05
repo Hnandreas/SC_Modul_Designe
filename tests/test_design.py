@@ -162,23 +162,23 @@ def test_emulation_energy_balance():
 
 
 def test_emulation_current_limit_is_the_limit():
-    """At U_C0min the voltage is held by the battery and the SC current keeps flowing, limited only by I_C0max.
-    ESR losses only heat the cells (simplified energy balance)."""
-    t = np.arange(0, 60, 0.001)
+    """At minimum energy the actual discharge current stops; battery supplies the remainder."""
+    t = np.arange(0, 6, 0.001)
     p = np.full_like(t, 600.0)
-    pb = np.zeros_like(p)                                     # split gives everything to the SC
-    m = ModuleModel(S=23, P=1, C_cell_F=30, R_cell_Ohm=0.026, U_min=33, U_max=48, U_init=42, I_max_A=15.0,
-                    R_th=22.1, C_th=19.7)
-    em = HESSEmulator(t, p, pb, m, EmulationConfig())
-    assert not em.cfg.soc_control and not em.cfg.esr_loss_in_energy
+    m = ModuleModel(S=23, P=1, C_cell_F=30, R_cell_Ohm=0.026, U_min=33, U_max=48,
+                    U_init=42, I_max_A=15.0, R_th=22.1, C_th=19.7)
+    em = HESSEmulator(t, p, np.zeros_like(p), m, EmulationConfig(soc_control=False))
     s, tr = em.run_cycle()
-    at = tr.U_sc <= 33.0 + 1e-9
-    assert s.t_at_Umin_s > 10 and tr.U_sc.min() >= 33.0 - 1e-6
-    assert np.all(tr.I_sc[at] > 0) and np.all(tr.I_sc <= 15.0 + 1e-9)     # current keeps flowing, <= I_C0max
-    assert s.t_current_limit_s > 0 and s.E_overflow_J > 0                  # beyond I_C0max: battery delivers the rest
-    assert s.E_loss_J > 0 and s.dT_max > 0                                 # losses heat the cells
-    # energy: E_SC changes only by the terminal power (simplified)
-    assert em.energy(42.0) - tr.E_sc[0] == pytest.approx(tr.P_sc_cell[0] * em.dt, rel=1e-9)
+    assert em.cfg.esr_loss_in_energy
+    assert s.t_at_Umin_s > 0 and em.voltage(em.E) == pytest.approx(33)
+    assert tr.I_sc[-1] == pytest.approx(0)
+    assert tr.P_sc[-1] == pytest.approx(0)
+    assert tr.P_bat[-1] == pytest.approx(600)
+    assert np.max(np.abs(tr.I_sc)) <= 15 + 1e-9
+    assert s.E_loss_J > 0 and s.dT_max > 0
+    removed = em.energy(42) - tr.E_sc[-1]
+    terminal = np.sum(tr.P_sc_cell * tr.dt)
+    assert removed == pytest.approx(terminal + s.E_loss_J, abs=1e-8)
 
 
 def test_power_limit_criterion_only_when_switched_on():
@@ -244,11 +244,13 @@ def test_emulation_design_and_thermal_chain():
     from sc_module_design.emudesign import emulation_design
     r = run_design(load_preset("thesis_characterized"))
     d = emulation_design(r, "profile", "VISHAY_HVR235_50F", check_eol=False)
-    # the emulation only checks: P stays as in the flowchart, one pass, no recharge controller
+    # The corrected emulation is continuous and PI-controlled; analytic S/P stay unchanged.
     assert d.P_final == d.P_analytic and len(d.iterations) == 1
-    assert np.all(d.trace.P_rech == 0)
+    assert d.emulator.cfg.soc_control
+    assert np.any(np.abs(d.trace.I_pi) > 0)
     assert d.chain is not None and np.all(d.chain["p_v"] >= 0)
-    assert d.history[-1].U_start == pytest.approx(r.scenarios["profile"].U_inM)
+    assert len(d.history) >= 2
+    assert d.emulator.R_cell_eff == pytest.approx(d.R_esr_cell_used)
 
 
 # ---------------------------------------------------------------------- PCB layout
@@ -421,8 +423,9 @@ def test_emulation_uses_same_thermal_network():
     d = emulation_design(r, "profile_braking", "VISHAY_HVR235_50F")
     it0 = d.iterations[0]
     assert it0.P == row.P == d.P_final and len(d.iterations) == 1
-    # same model, same P. The thermal page assumes the current continuously, in the emulation the SC carries no
-    # current while U_C0min is reached: the emulation is at most slightly above and not far below the thermal page
-    assert 0.75 * row.dT_net_max_K < it0.dT_net_max_K < 1.05 * row.dT_net_max_K
-    assert 0.75 * row.dT_max_K < it0.dT_block_max_K < 1.05 * row.dT_max_K
+    # The thermal network is unchanged, but its source is now the actual current
+    # including PI recharge, periodic filtering and physical voltage curtailment.
+    assert np.all(d.chain['p_v'] >= 0)
+    assert d.R_esr_cell_used == pytest.approx(d.emulator.R_cell_eff)
+    assert it0.dT_net_max_K > 0 and it0.dT_block_max_K > 0
     assert it0.dT_net_max_K > it0.dT_block_max_K

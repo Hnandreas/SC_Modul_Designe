@@ -2,6 +2,7 @@
 
     python -m sc_module_design.cli --preset iecon2023_legacy
     python -m sc_module_design.cli --preset thesis_characterized --out outputs/thesis --no-figures
+    python -m sc_module_design.cli --preset thesis_characterized --report      (also the PDF report)
     python -m sc_module_design.cli --list
 """
 from __future__ import annotations
@@ -19,6 +20,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--no-figures", action="store_true")
     ap.add_argument("--list", action="store_true", help="list presets")
+    ap.add_argument("--report", action="store_true", help="also write the design report as PDF")
     a = ap.parse_args(argv)
     if a.list:
         for p in list_presets():
@@ -38,6 +40,10 @@ def main(argv=None) -> int:
             print(bad.to_string(index=False) if not bad.empty else "none")
     out = export_run(res, a.out, figures=not a.no_figures)
     print(f"\nResults written to {out}")
+    if a.report:
+        from .report_pdf import build_report
+        pdf, engine = build_report(res, out)
+        print(f"Report: {pdf} ({engine})")
     return 0
 
 

@@ -30,6 +30,7 @@ source .venv/bin/activate
 python -m sc_module_design.cli --list
 python -m sc_module_design.cli --preset iecon2023_legacy          # rechnet und exportiert nach outputs/
 python -m sc_module_design.cli --preset thesis_characterized --out outputs/thesis
+python -m sc_module_design.cli --preset thesis_characterized --report   # zusätzlich Bericht als PDF
 python -m pytest -q                                                # Regressionstests
 ```
 
@@ -57,8 +58,8 @@ Geführter Ablauf, eine Seite je Schritt des Flussdiagramms (Seitenleiste links,
 | 5 Zellauswahl und Layout | Kapazitäts- und ESR-Quelle, **Leiterplatte** (Packung, Ausrichtung, Stecker), Tabelle aller Kandidaten (P-Treiber, Reserve am Lebensende und neu), „Was passt in den Bauraum?“, Layout-Vergleich quadratisch/hexagonal im gemeinsamen Maßstab |
 | 6 Thermik | Gemeinsame Annahmen, dann getrennt: A Einzelzelle (Diss A01, gemessen), B Blockmodell (Lehrbuch, für SC-Module nicht validiert, FEM empfohlen), C Netzwerk (eigener Ansatz, nicht validiert, FEM empfohlen) mit Wärmebild und Aufheizen, Modellvergleich und Messvergleich, ideale Anordnung mit Nachbarschichten |
 | 7 Bewertung und Auswahl | Gewichtung (ausgewogen, Kosten, kompakt, robust, eigene), Rangliste, 2x2-Abbildung wie IECON mit wählbaren Größen (Kosten, Modulvolumen, Platinenfläche, Moduldichte, Masse oder Abweichung zu einer Referenz in %), interaktiver Vergleich, Auswahl übernehmen |
-| 8 Emulation und Auslegung | Profil endlos im HESS, Strom aus der Leistungsbilanz mit ESR-Abfall, Abbildung mit Spannungen (Bus, U_C, Klemme), Busströmen (Last, Batterie, SC) und SC-Strömen (Modul, Bus), Busspannung nominal oder konservativ, Thermik schaltbar und mit demselben Modell wie Seite 6 (Netzwerk, heißeste Zelle), P erhöhen bis alles eingehalten ist, Live-Ansicht |
-| Zelldetail, Datenbank, Export | eine Zelle mit eigenen Optionen, Tabellen bearbeiten, Export (YAML, CSV, LaTeX, Abbildungen PDF/SVG/PNG) |
+| 8 Emulation und Auslegung | Profil endlos im HESS, Strom aus der Leistungsbilanz mit ESR-Abfall, Abbildung mit Spannungen (Bus, U_C, Klemme), Busströmen (Last, Batterie, SC) und SC-Strömen (Modul, Bus), Busspannung nominal oder konservativ, Thermik schaltbar und mit demselben Modell wie Seite 6 (Netzwerk, heißeste Zelle), PI-Nachladen und Leistungsprüfung, P/S bleiben unverändert, kontinuierliche Live-Ansicht |
+| Zelldetail, Datenbank, Export | eine Zelle mit eigenen Optionen, Tabellen bearbeiten, Export: Name ist Pflicht, speichert immer auch das Preset mit allen Einstellungen (auch Emulation), YAML, CSV, LaTeX, Abbildungen PDF/SVG/PNG (genau 8 / 16 cm breit) und Bericht als PDF (Englisch, je Modul höchstens drei Kandidaten, Modulvergleich, Layout, alle Abbildungen) |
 
 Konfigurationen außerhalb der Vorgaben (oder der thermischen bzw. P-Grenze) bleiben in den Tabellen sichtbar
 (Spalte Status) und sind in allen Abbildungen grau.
@@ -88,15 +89,57 @@ Zelle unter ΔT_max liegt).
 
 ### Emulation (Prüfung, Schritt 14)
 
-Die Emulation prüft das Modul aus dem Flussdiagramm, P und S werden nicht verändert. Das Profil läuft einmal ab
-U_C0inM (vorgeladen), Aufteilung wie in Schritt 2 (der Split lädt den SC nach, kein eigener Nachladeregler).
-Je Zeitschritt: Leistung am SC aus der Busleistung mit Wirkungsgrad (Entladen P_Bus / η_dch, Laden P_Bus η_ch),
-Strom aus der Leistungsbilanz P = U_SC I_SC mit U_SC = U_C - R_ESR I_SC, also
-I_SC = (U_C - sqrt(U_C² - 4 R_ESR P)) / (2 R_ESR). Grenze ist der Wandlerstrom I_C0max, darüber liefert die
-Batterie anteilig. An U_C0min hält die Batterie die Spannung, der SC-Strom fließt weiter. Vereinfachte Annahme:
-die ESR-Verluste erwärmen die Zellen, werden aber nicht von der SC-Energie abgezogen. Ausgegeben werden Zeit an
-U_C0min und I_C0max, von der Batterie übernommene Energie, Spitzen- und RMS-Strom und die Zelltemperatur (gleiches
-Modell wie Seite 6, periodischer Zustand). Standard ist die Prüfung am Lebensende (C x L_EOL, ESR x 2).
+Die Emulation prüft das vorhandene Modul: S, P, Zellwahl und Spannungsgrenzen werden nicht geändert.
+Sie wiederholt das Profil bis zum periodischen Zustand und erhält dabei Energie, PI-Integrator,
+Reglerclock und Temperatur. Die Live-Ansicht setzt eine Kopie genau dieses Zustands fort – mit
+identischem ESR, EOL-Zustand, Wirkungsgrad und Profil einschließlich Bremsereignis.
+
+Nachladen: Spannungs-PI aus **Only_PWM_Interlaved6**, Kp = 0,2 A/V, Ki = 0,5 A/(V·s),
+Ausgang ±5 A **Gesamtstrom**. Der unterlagerte Stromregler ist idealisiert. Es gibt keine separate
+300-W-Nachladebegrenzung mehr. Die Referenz und die Anfangsspannung sind getrennte Eingaben;
+die Anfangsspannung wird nur beim ersten Start verwendet. Ein bereits höherer Energiezustand
+wird nicht auf die Referenz zurückgesetzt.
+
+Die **ausdrückliche aktuelle Nutzervorgabe** ist f_sw = 100 kHz, PI nach jeweils fünf PWM-Perioden:
+f_PI = 20 kHz, Ts = 50 µs. Im gefundenen ursprünglichen Firmware-Initializer stehen noch 30 µs;
+die Firmware selbst wurde hier nicht geändert. Kp wird nicht mit der Aufrufzahl multipliziert.
+Je Regleraufruf wächst der Integrator um Ki · e · Ts; die bedingte Integration verhindert Windup.
+Für die Langzeitemulation werden die Aufrufe bei gehaltenem Feedback innerhalb eines Pflanzenbins
+analytisch zusammengefasst. Dies bewahrt die Clock und Gain-Zeitbasis; die Pflanzen-/Feedback-
+Diskretisierung bleibt eine Näherung und ist durch kleinere Bins zu prüfen.
+
+**Vorzeichen:** I_SC > 0 lädt, I_SC < 0 entlädt, U_Klemme = U_C + R · I_SC.
+RMS bleibt nichtnegativ. Die bisherige Leistungskonvention bleibt erhalten: positive P_SC versorgt
+den Bus. Deshalb ist P_Klemme,out = −U_Klemme · I_SC. Die analytischen historischen Stromhilfen
+in `current.py` behalten ihre eigene dokumentierte Entladestrom-Konvention; die Emulation adaptiert sie.
+
+ESR-Verluste gehören immer in die Speicherbilanz: dE/dt = −P_Klemme,out −R · I_RMS².
+An U_min/U_max wird der **tatsächliche Strom** begrenzt; die Batterie übernimmt die Differenz.
+Auch die Buck-Wandlergrenze wird berücksichtigt: U_Klemme = U_C + R I_SC darf beim Laden
+D_max · U_Bus nicht überschreiten (D_max = 0,98 aus Interleaved 6). Dafür wird der tatsächliche
+Ladestrom begrenzt, einschließlich regenerativer Lastspitzen und der erreichbaren Ladespannung
+innerhalb eines Pflanzenbins. Nicht die dargestellte Spannung abschneiden! Der Referenzwert
+und das Moduldesign bleiben unverändert. Ist die Anfangsenergie bereits höher, wird sie nicht
+künstlich gelöscht; ein nicht regelbarer Betriebspunkt wird ausdrücklich gemeldet.
+Bei 40 V tatsächlicher Busspannung liegt die Wandlergrenze bei 39,2 V; eine Referenz von etwa
+41,93 V ist dann nicht erreichbar. Ein konservativer Strom-Rechenwert U_Bus,min verändert nur
+die entsprechend gekennzeichnete Stromabschätzung, nicht die tatsächliche Busspannung des Wandlers.
+Es gibt keinen weiterfließenden Phantomstrom bei festgehaltener Kondensatorenergie.
+RMS/Temperatur basieren auf den tatsächlich begrenzten Strömen bei voller Profilauflösung
+(mit innerhalb des Pflanzenbins angenäherter interner Spannung).
+
+Nur für die Emulation werden kausale Filter periodisch fortgesetzt. Legacy-Nullpadding darf nicht
+bei jeder Wiederholung einen neuen SC-Energiebedarf erzeugen. Die veröffentlichte Legacy-
+Auslegung und alle dafür verwendeten Auswahlparameter bleiben erhalten.
+
+Die Leistungsprüfung ist ein anklickbarer/ausblendbarer Bereich und verwendet die momentane
+interne Spannung U_C(t), nicht pauschal die größte Leistung bei der kleinsten Spannung.
+Das Ausblenden deaktiviert keine physikalischen Grenzen. Fehler lösen keine automatische
+Modulvergrößerung aus. Das Einschwingen prüft Spannung, PI-Integrator und Temperatur an
+Periodengrenzen; Nichterreichen innerhalb der maximalen Zykluszahl wird ausgewiesen.
+
+Zusammenarbeit: Vor Änderungen **AGENT_HANDOFF.md** lesen, Arbeitsbaum prüfen, danach den
+Änderungsstand einschließlich Tests ergänzen. AGENTS.md und CLAUDE.md verweisen auf diese Datei.
 
 ### Thermik in der Auslegung
 

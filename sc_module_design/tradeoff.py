@@ -20,11 +20,16 @@ CRITERIA = {
     "reserve": ("C_reserve", "max_capped", "Kapazitätsreserve"),
     "data": ("data_quality", "max", "Datenbasis (gemessen statt Datenblatt)"),
 }
+# Switched off for now (decision Andy, 2026-11-05): available measured data must not give a candidate a better
+# rating, otherwise the comparison is unfair to cells that were simply not characterized. The criterion stays in
+# the code; remove it from this set to use it again. Disabled criteria are ignored even with custom weights.
+DISABLED_CRITERIA = {"data"}
+ACTIVE_CRITERIA = {k: v for k, v in CRITERIA.items() if k not in DISABLED_CRITERIA}
 WEIGHT_PRESETS = {
-    "balanced": ("Ausgewogen", {k: 1.0 for k in CRITERIA}),
+    "balanced": ("Ausgewogen", {k: 1.0 for k in ACTIVE_CRITERIA}),
     "cost": ("Kosten (wie IECON)", {"cost": 1.0}),
     "compact": ("Kompakt", {"mass": 1.0, "volume": 1.0, "cells": 0.5}),
-    "robust": ("Robust / Lebensdauer", {"losses": 1.0, "thermal": 1.0, "reserve": 1.0, "data": 1.0, "cells": 0.5,
+    "robust": ("Robust / Lebensdauer", {"losses": 1.0, "thermal": 1.0, "reserve": 1.0, "cells": 0.5,
                                         "cost": 0.5}),
     "custom": ("Eigene Gewichtung", None),
 }
@@ -100,7 +105,7 @@ def criterion_scores(df: pd.DataFrame, reserve_cap: float = 0.3) -> pd.DataFrame
 def score(df: pd.DataFrame, weights: dict, reserve_cap: float = 0.3) -> tuple[pd.Series, pd.DataFrame]:
     """Weighted score in % (100 = best in every weighted criterion) and the contribution per criterion."""
     cs = criterion_scores(df, reserve_cap)
-    w = {k: float(weights.get(k, 0.0)) for k in CRITERIA}
+    w = {k: float(weights.get(k, 0.0)) for k in ACTIVE_CRITERIA}
     w = {k: v for k, v in w.items() if v > 0 and cs[k].notna().any()}
     tot = sum(w.values())
     contrib = pd.DataFrame(index=df.index)

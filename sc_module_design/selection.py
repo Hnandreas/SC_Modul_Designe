@@ -574,6 +574,7 @@ def evaluate_candidate(cell: dict, sc: ScenarioContext, S: int, u_cell_max_life:
         I_cell_rms_max_A=i_cell_rms_max,
         block_mm=(f"{lay.width_mm:.0f} x {lay.depth_mm:.0f} x {lay.height_mm:.0f}" if lay else ""),
         pcb_width_mm=lay.width_mm if lay else np.nan, pcb_depth_mm=lay.depth_mm if lay else np.nan,
+        module_height_mm=lay.height_mm if lay else np.nan,
         c_measured=fit is not None and opt.c_source != "datasheet",
         esr_measured=r_row is not None, thermal_measured=bool(th) and not th.get("proxy_of"),
         pcb_mm=(f"{lay.width_mm:.0f} x {lay.depth_mm:.0f}" if lay else ""),

@@ -113,12 +113,14 @@ def show_fig(fig, key: str, width_cm: Optional[float] = None, container=None, pl
     c = container or st
     w_in = fig.get_size_inches()[0]
     width_cm = width_cm or w_in * 2.54
+    from sc_module_design.style import exact_width_bbox
+    box = exact_width_bbox(fig)                      # exact width (8 / 16 cm), height cropped
     png = io.BytesIO()
-    fig.savefig(png, format="png", dpi=250)
+    fig.savefig(png, format="png", dpi=250, bbox_inches=box)
     pdf = io.BytesIO()
-    fig.savefig(pdf, format="pdf")
+    fig.savefig(pdf, format="pdf", bbox_inches=box)
     svg = io.BytesIO()
-    fig.savefig(svg, format="svg")
+    fig.savefig(svg, format="svg", bbox_inches=box)
     c.image(png.getvalue(), width=int(width_cm * PX_PER_CM))
     cc = c.columns([1, 1, 2]) if fx_keys else [c]
     if fx_keys:

@@ -1,26 +1,15 @@
-"""HESS emulation with the load profile repeated endlessly (thermal simulation / cooling concept, step 14).
+"""Continuous HESS precheck, with a voltage PI and a charge-positive SC current.
 
-Power balance at the interface converter in every time step:
+I_SC > 0 charges the capacitor; U_terminal = U_C + R I_SC.
+P_SC > 0 supplies the DC bus (the existing load-power convention is retained).
+Every actual terminal joule and ESR-loss joule is included in stored energy.
+Neither voltage limits nor the PI reference are ideal energy sources/sinks.
 
-    P_bus = U_bus I_bus                         (SC share on the DC bus, e.g. 48 V)
-    P_SC  = P_bus / eta_dch  (discharge)        P_SC = P_bus eta_ch (charge)
-    P_SC  = U_SC I_SC  with  U_SC = U_C - R I_SC (terminal voltage = internal voltage minus ESR drop)
-    ->  I_SC = (U_C - sqrt(U_C^2 - 4 R P_SC)) / (2 R)        (see current.py)
-
-Per bin (default 10 ms, mean and mean square of the full-resolution power are kept):
-  battery    P_bat = p_bat_split + P_rech + P_overflow
-  SC         P_bus,SC = p_sc_split - P_rech, limited by the converter current limit I_C0max (hard) and the power
-             limit U_C^2/(4R), the rest is delivered by the battery (overflow). At U_C0min / U_C0max the voltage is
-             held and the battery delivers / takes the energy, the SC current keeps flowing (the limit is the
-             current of the converter, not the voltage).
-  recharge   P_rech = K (E_target - E), limited to +-P_rech_max (optional, off by default: the split, e.g. the
-             moving average, recharges the SC)
-  SC energy  dE/dt = -P_SC                     (simplified: the ESR loss R i^2 heats the cells but is not taken
-                                               from the stored energy; optional esr_loss_in_energy)
-  cell temperature  C_th dT/dt = R_cell i_cell^2 - dT / R_th
-
-``run_cycle()`` advances one profile period, ``run_until_steady()`` repeats until U and dT are
-periodic, ``stream()`` / ``_advance()`` continue forever (live view in the GUI).
+The user-specified voltage-loop clock is 100 kHz / 5 = 20 kHz. Within
+one numerical bin the measured voltage is held; the discrete firmware PI calls
+are aggregated analytically, including conditional integration and saturation.
+The clock remainder, integrator, energy and temperature survive all cycle/chunk
+boundaries. This is an averaged plant, not a switching simulation.
 """
 from __future__ import annotations
 
@@ -39,13 +28,13 @@ from .profile import bin_signal
 class ModuleModel:
     S: int
     P: int
-    C_cell_F: float                 # constant capacitance per cell (datasheet or C_eq,E)
+    C_cell_F: float
     R_cell_Ohm: float
     U_min: float
     U_max: float
     U_init: float
     I_max_A: float
-    C0_cell_F: Optional[float] = None   # if given (with k), C(U) = C0 + kU is used
+    C0_cell_F: Optional[float] = None
     k_cell_FperV: Optional[float] = None
     R_th: Optional[float] = None
     C_th: Optional[float] = None
@@ -67,22 +56,104 @@ class ModuleModel:
 @dataclass
 class EmulationConfig:
     dt_bin_s: float = 0.01
-    soc_control: bool = False           # extra recharge controller (off: the split, e.g. moving average, recharges)
-    soc_target: str = "U_C0inM"         # U_C0inM | U_C0max
-    K_soc_per_s: float = 0.05           # P_rech = K (E_target - E)
-    P_rech_max_W: float = 300.0
-    eol: bool = False                   # end of life: C x L_EOL, R x esr_eol_factor
-    L_EOL: float = 0.7
+    soc_control: bool = True  # voltage PI; legacy argument retained, no energy-P controller
+    soc_target: str = "U_C0inM"
+    voltage_reference_V: Optional[float] = None
+    initial_voltage_V: Optional[float] = None
+    pi_kp: float = 0.2
+    pi_ki: float = 0.5
+    pi_min_A: float = -5.0
+    pi_max_A: float = 5.0
+    switching_frequency_Hz: float = 100_000.0
+    pi_every_pwm_cycles: int = 5
+    eol: bool = False
+    L_EOL: float = 0.7  # existing design assumption; not changed by emulation
     esr_eol_factor: float = 2.0
+    aging_capacity_factor: Optional[float] = None
+    aging_esr_factor: Optional[float] = None
     T_amb_C: float = 25.0
-    eta_dch: float = 1.0                # converter efficiency SC -> bus (applied in every time step)
-    eta_ch: float = 1.0                 # converter efficiency bus -> SC
-    esr_loss_in_energy: bool = False    # simplified (default): ESR losses heat the cells but are not taken from E_SC
-    U_bus_V: float = 48.0               # DC bus voltage (for the bus current I_bus = P_bus / U_bus)
-    U_conv_min_V: Optional[float] = None  # minimum input voltage of the converter (terminal voltage U_C - R I)
+    eta_dch: float = 1.0
+    eta_ch: float = 1.0
+    esr_loss_in_energy: bool = True
+    U_bus_V: float = 48.0
+    converter_max_duty: float = 0.98  # Interleaved-6 inner PI upper duty clamp
+    U_conv_min_V: Optional[float] = None
     max_cycles: int = 200
     tol_U_V: float = 1e-3
     tol_T_K: float = 0.02
+    tol_pi_A: float = 1e-3
+
+    @property
+    def pi_period_s(self) -> float:
+        return self.pi_every_pwm_cycles / self.switching_frequency_Hz
+
+    def __post_init__(self):
+        if self.switching_frequency_Hz <= 0 or self.pi_every_pwm_cycles < 1:
+            raise ValueError("PI clock requires positive switching frequency and divider")
+        if self.pi_min_A >= self.pi_max_A or self.pi_kp < 0 or self.pi_ki < 0:
+            raise ValueError("Invalid PI gains or output limits")
+        if self.U_bus_V <= 0 or not 0 < self.converter_max_duty <= 1:
+            raise ValueError("Invalid bus voltage or converter duty limit")
+        if not self.esr_loss_in_energy:
+            raise ValueError("The emulation must include ESR losses in stored energy")
+        if not (0 < self.eta_dch <= 1 and 0 < self.eta_ch <= 1) or self.dt_bin_s <= 0:
+            raise ValueError("Invalid efficiency or numerical timestep")
+
+
+class VoltagePI:
+    """Interleaved-6 conditional-integration PI, retimed by the user to 20 kHz.
+
+    Ki is A/(V*s): each real PI call adds Ki*error*Ts, exactly once.
+    Kp is A/V and is NOT multiplied by frequency or by the number of calls.
+    advance() holds feedback across a plant bin and returns the mean command
+    of its real PI calls. It is algebraically equivalent to calling the firmware
+    PI n times at this held error, without a Python loop at 20 kHz.
+    """
+    def __init__(self, cfg: EmulationConfig):
+        self.cfg = cfg
+        self.integral = 0.0
+        self.output = 0.0
+        self.remainder_s = 0.0
+        self.calls = 0
+
+    @staticmethod
+    def _sum_clipped(start, step, n, lo, hi):
+        if n <= 0:
+            return 0.0
+        if step == 0:
+            return n * min(hi, max(lo, start))
+        if step < 0:
+            start += (n - 1) * step
+            step = -step
+        left = min(n, max(0, int(math.ceil((lo - start) / step))))
+        right = min(n, max(left, int(math.ceil((hi - start) / step))))
+        count = right - left
+        middle = count * (start + step * (left + right - 1) / 2)
+        return left * lo + middle + (n - right) * hi
+
+    def advance(self, error: float, elapsed_s: float) -> float:
+        ts = self.cfg.pi_period_s
+        total = self.remainder_s + elapsed_s
+        n = int(math.floor(total / ts + 1e-9))
+        self.remainder_s = max(0.0, total - n * ts)
+        if n == 0:
+            return self.output
+        lo, hi = self.cfg.pi_min_A, self.cfg.pi_max_A
+        y = self.cfg.pi_kp * error + self.integral
+        delta = self.cfg.pi_ki * error * ts
+        updates = 0
+        if delta > 0 and y < hi:
+            updates = min(n, max(0, int(math.ceil((hi - y) / delta))))
+        elif delta < 0 and y > lo:
+            updates = min(n, max(0, int(math.ceil((lo - y) / delta))))
+        total_output = self._sum_clipped(y, delta, updates, lo, hi)
+        frozen = min(hi, max(lo, y + updates * delta))
+        total_output += (n - updates) * frozen
+        last_y = y + min(updates, n - 1) * delta
+        self.output = min(hi, max(lo, last_y))
+        self.integral += updates * delta
+        self.calls += n
+        return total_output / n
 
 
 @dataclass
@@ -90,18 +161,31 @@ class CycleTrace:
     t: np.ndarray
     P_load: np.ndarray
     P_bat: np.ndarray
-    P_sc: np.ndarray                # SC share on the bus side
-    P_rech: np.ndarray
-    U_sc: np.ndarray                # internal SC voltage U_C (open circuit)
-    I_sc_rms: np.ndarray            # RMS SC current per step
+    P_sc: np.ndarray                 # positive = supplies the bus
+    P_rech: np.ndarray               # requested bus recharge contribution
+    U_sc: np.ndarray                 # internal voltage at START of bin
+    I_sc_rms: np.ndarray             # always nonnegative
     dT: np.ndarray
     overflow: np.ndarray
-    P_sc_cell: np.ndarray           # power at the SC terminals
-    I_sc: np.ndarray                # SC current (mean per step), + = discharge
-    E_sc: np.ndarray                # stored energy at the end of each step
-    I_sc_peak: np.ndarray           # largest |I_SC| inside each step (full resolution)
-    U_term: np.ndarray              # terminal voltage U_C - R I
-    I_bus: np.ndarray               # bus-side current of the SC path, P_bus / U_bus
+    P_sc_cell: np.ndarray            # module terminal output power, NOT per-cell power
+    I_sc: np.ndarray                 # positive = charge, negative = discharge
+    E_sc: np.ndarray                 # stored energy at END of bin
+    I_sc_peak: np.ndarray
+    U_term: np.ndarray               # U_C + R I_SC
+    I_bus: np.ndarray                # charge-positive bus-side SC current
+    I_pi: Optional[np.ndarray] = None
+    pi_integral: Optional[np.ndarray] = None
+    P_required: Optional[np.ndarray] = None
+    P_available: Optional[np.ndarray] = None
+    power_limited: Optional[np.ndarray] = None
+    dt: Optional[np.ndarray] = None
+    I_sc_full: Optional[np.ndarray] = None
+    voltage_limited: Optional[np.ndarray] = None
+    U_term_peak: Optional[np.ndarray] = None
+    converter_range_violation: Optional[np.ndarray] = None
+    unmet_discharge_W: Optional[np.ndarray] = None
+    current_limited: Optional[np.ndarray] = None
+    requested_current_extreme_A: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -129,277 +213,230 @@ class CycleSummary:
     U_term_min_V: float = 0.0
     t_power_limit_s: float = 0.0
     t_Uconv_min_s: float = 0.0
+    pi_integral_start_A: float = 0.0
+    pi_integral_end_A: float = 0.0
+    t_bus_voltage_limit_s: float = 0.0
+    t_converter_range_s: float = 0.0
 
 
 class HESSEmulator:
-    def __init__(self, t: np.ndarray, p_load: np.ndarray, p_bat: np.ndarray, module: ModuleModel,
-                 cfg: Optional[EmulationConfig] = None):
+    def __init__(self, t, p_load, p_bat, module: ModuleModel, cfg=None):
         self.cfg = cfg or EmulationConfig()
         self.m = module
-        dt = float(t[1] - t[0])
-        self.load = bin_signal(p_load, dt, self.cfg.dt_bin_s)
-        self.bat = bin_signal(p_bat, dt, self.cfg.dt_bin_s)
-        self.sc = bin_signal(p_load - p_bat, dt, self.cfg.dt_bin_s)
-        self.dt = self.load.dt
-        self.n = self.load.n
-        self.period = self.n * self.dt
-        c_fac = self.cfg.L_EOL if self.cfg.eol else 1.0
-        r_fac = self.cfg.esr_eol_factor if self.cfg.eol else 1.0
+        if not (0 < module.U_min < module.U_max and module.I_max_A > 0):
+            raise ValueError("Invalid existing module voltage/current limits")
+        self.raw_dt = float(t[1] - t[0])
+        self.load = bin_signal(p_load, self.raw_dt, self.cfg.dt_bin_s)
+        self.bat = bin_signal(p_bat, self.raw_dt, self.cfg.dt_bin_s)
+        self.sc = bin_signal(p_load - p_bat, self.raw_dt, self.cfg.dt_bin_s)
+        self.dt, self.n = self.load.dt, self.load.n
+        group = max(1, int(round(self.dt / self.raw_dt)))
+        self.raw_sc = [np.asarray(p_load[a:a + group] - p_bat[a:a + group], float)
+                       for a in range(0, len(p_load), group)]
+        self.bin_dt = np.array([len(a) * self.raw_dt for a in self.raw_sc])
+        self.period = float(self.bin_dt.sum())
+        c_fac = self.cfg.aging_capacity_factor if self.cfg.aging_capacity_factor is not None else (self.cfg.L_EOL if self.cfg.eol else 1.0)
+        r_fac = self.cfg.aging_esr_factor if self.cfg.aging_esr_factor is not None else (self.cfg.esr_eol_factor if self.cfg.eol else 1.0)
         self.R_mod = module.R_module * r_fac
         self.R_cell_eff = module.R_cell_Ohm * r_fac
         self._setup_energy(c_fac)
-        self.E = self.energy(module.U_init)
-        target = module.U_init if self.cfg.soc_target == "U_C0inM" else module.U_max
-        self.E_target = self.energy(target)
+        initial = self.cfg.initial_voltage_V if self.cfg.initial_voltage_V is not None else module.U_init
+        if not module.U_min <= initial <= module.U_max:
+            raise ValueError("Initial voltage is outside the existing module limits")
+        self.E = self.energy(initial)
+        self.U_reference = self.cfg.voltage_reference_V
+        if self.U_reference is None:
+            self.U_reference = module.U_max if self.cfg.soc_target == "U_C0max" else module.U_init
+        if not module.U_min <= self.U_reference <= module.U_max:
+            raise ValueError("Voltage reference is outside the existing module limits")
         self.E_lo, self.E_hi = self.energy(module.U_min), self.energy(module.U_max)
+        self.pi = VoltagePI(self.cfg)
+        self.last_current = 0.0
         self.dT = 0.0
-        self.cycle = 0
-        self.pos = 0
-        self.history: list[CycleSummary] = []
+        self.cycle = self.pos = 0
+        self.elapsed = 0.0
+        self.history = []
+        self.converged = False
         self._reset_stats()
         self.thermal = module.R_th is not None and module.C_th is not None
-        if self.thermal:
-            self.a_th = math.exp(-self.dt / (module.R_th * module.C_th))
 
-    # ------------------------------------------------------------------ energy <-> voltage
-    def _setup_energy(self, c_fac: float) -> None:
+    def _setup_energy(self, c_fac):
         m = self.m
         self.cu = m.C0_cell_F is not None and m.k_cell_FperV is not None
         if self.cu:
             u = np.linspace(0.0, m.U_max / m.S * 1.05, 2001)
-            e_cell = eq.cell_energy_cu(m.C0_cell_F * c_fac, m.k_cell_FperV * c_fac, u)
             self._U_tab = u * m.S
-            self._E_tab = e_cell * m.n_cells
+            self._E_tab = eq.cell_energy_cu(m.C0_cell_F * c_fac, m.k_cell_FperV * c_fac, u) * m.n_cells
         else:
             self.C = m.C_module * c_fac
 
-    def energy(self, U: float) -> float:
-        if self.cu:
-            return float(np.interp(U, self._U_tab, self._E_tab))
-        return 0.5 * self.C * U * U
+    def energy(self, U):
+        return float(np.interp(U, self._U_tab, self._E_tab)) if self.cu else 0.5 * self.C * U * U
 
-    def voltage(self, E: float) -> float:
-        if self.cu:
-            return float(np.interp(E, self._E_tab, self._U_tab))
-        return math.sqrt(max(2.0 * E / self.C, 0.0))
+    def voltage(self, E):
+        return float(np.interp(E, self._E_tab, self._U_tab)) if self.cu else math.sqrt(max(2 * E / self.C, 0))
 
-    # ------------------------------------------------------------------ core loop
-    def _advance(self, n_bins: int) -> CycleTrace:
-        cfg, m = self.cfg, self.m
-        dt, R = self.dt, self.R_mod
-        pl, pb = self.load.mean.tolist(), self.bat.mean.tolist()
-        sm, sq = self.sc.mean.tolist(), self.sc.mean_sq.tolist()
-        smax, smin = self.sc.vmax.tolist(), self.sc.vmin.tolist()
-        (o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of, o_pc, o_is, o_E, o_ip, o_ut,
-         o_ib) = (np.empty(n_bins) for _ in range(15))
-        E, dT = self.E, self.dT
-        Ksoc, Pr_max, Et = cfg.K_soc_per_s, cfg.P_rech_max_W, self.E_target
-        Elo, Ehi = self.E_lo, self.E_hi
-        Imax = m.I_max_A
-        npc = m.n_cells
-        th = self.thermal
-        a_th = self.a_th if th else 0.0
-        rth = m.R_th if th else 0.0
-        cu = self.cu
-        C = None if cu else self.C
-        voltage = self.voltage
-        stats = self._stats
-        soc = cfg.soc_control
-        eloss = cfg.esr_loss_in_energy
-        ed, ec = cfg.eta_dch, cfg.eta_ch
-        Ubus = cfg.U_bus_V
-        t_lo = t_hi = t_ilim = t_plim = E_loss = E_of = E_conv = 0.0
-        sqrt = math.sqrt
-        k = self.pos
-        n = self.n
-        t_base = self.cycle * self.period
-        R2 = 2.0 * R
-        noR = R <= 1e-12
+    def _to_terminal(self, p_bus):
+        return np.where(p_bus > 0, p_bus / self.cfg.eta_dch, p_bus * self.cfg.eta_ch)
 
-        def cur(p, U):
-            """SC current for terminal power p at internal voltage U (ESR drop). Returns (i, limited)."""
-            if noR:
-                return p / U, False
-            if p >= 0:
-                d = U * U - 4.0 * R * p
-                if d < 0:
-                    return U / R2, True
-                return (U - sqrt(d)) / R2, False
-            return -(sqrt(U * U - 4.0 * R * p) - U) / R2, False
+    def _to_bus(self, p_terminal):
+        return np.where(p_terminal > 0, p_terminal * self.cfg.eta_dch, p_terminal / self.cfg.eta_ch)
 
+    def _advance(self, n_bins):
+        fields = [np.empty(n_bins) for _ in range(21)]
+        (ot, opl, opb, ops, opr, ou, oi, odt, oof, opc, ois, oe, oip, out, oib,
+         opi, oint, oreq, oavail, olim, oduration) = fields
+        raw_currents = []
+        voltage_limited = np.empty(n_bins, dtype=bool)
+        terminal_peak = np.empty(n_bins)
+        unmet_discharge = np.empty(n_bins)
+        current_limited = np.empty(n_bins, dtype=bool)
+        requested_extreme = np.empty(n_bins)
+        range_violation = np.empty(n_bins, dtype=bool)
+        R, cfg, m = self.R_mod, self.cfg, self.m
+        converter_ceiling = cfg.converter_max_duty * cfg.U_bus_V
+        converter_energy_ceiling = self.energy(min(m.U_max, converter_ceiling))
         for j in range(n_bins):
-            U = voltage(E) if cu else sqrt(2.0 * E / C)
-            p_rech = 0.0
-            if soc:
-                p_rech = Ksoc * (Et - E)
-                if p_rech > Pr_max:
-                    p_rech = Pr_max
-                elif p_rech < -Pr_max:
-                    p_rech = -Pr_max
-            smk = sm[k]
-            ps = smk - p_rech                       # SC share on the bus side
-            dis = ps > 0
-            pc = ps / ed if dis else ps * ec        # power at the SC terminals
-            i, plim = cur(pc, U)
-            limited = plim
-            if i > Imax:
-                i, limited = Imax, True
-            elif i < -Imax:
-                i, limited = -Imax, True
-            if plim:
-                t_plim += dt
-            overflow = 0.0
-            if limited:
-                if i == Imax or i == -Imax:
-                    t_ilim += dt
-                pc_new = (U - R * i) * i
-                bus = pc_new * ed if pc_new > 0 else pc_new / ec
-                overflow = ps - bus
-                ps, pc = bus, pc_new
-            # peak current inside the bin
-            hi = smax[k] - p_rech
-            lo = smin[k] - p_rech
-            ph = hi / ed if hi > 0 else hi * ec
-            plo = lo / ed if lo > 0 else lo * ec
-            ipk = max(abs(cur(ph, U)[0]), abs(cur(plo, U)[0]))
-            if ipk > Imax:
-                ipk = Imax
-                if not limited:
-                    t_ilim += dt
-            # mean square current inside the bin (RMS of the terminal power converted to current)
-            msq = sq[k] - 2.0 * p_rech * smk + p_rech * p_rech
-            msq = msq / (ed * ed) if dis else msq * ec * ec
-            prms = sqrt(msq) if msq > 0 else 0.0
-            irms = abs(cur(prms if pc >= 0 else -prms, U)[0])
-            if irms > Imax:
-                irms = Imax
-            i2 = irms * irms
-            if i2 < i * i:
-                i2 = i * i
+            k, E = self.pos, self.E
+            dt, U = self.bin_dt[k], self.voltage(E)
+            feedback = U + R * self.last_current
+            ipi = self.pi.advance(self.U_reference - feedback, dt) if cfg.soc_control else 0.0
+            base_pc = self._to_terminal(self.raw_sc[k])
+            # current.py retains its discharge-positive convention for analytic sizing.
+            base_i, _ = current_array(base_pc, U, R)
+            base_i = -base_i
+            requested = base_pc - (U + R * (2 * base_i + ipi)) * ipi
+            wanted_i = base_i + ipi
+            available = U * U / (4 * R) if R > 1e-12 else float("inf")
+            plim = bool(np.any(requested > available + 1e-9))
+            # Remain on the stable constant-power branch; keep existing converter limits.
+            lo = -min(m.I_max_A, U / (2 * R)) if R > 1e-12 else -m.I_max_A
+            hi = m.I_max_A
+            # Averaged buck charge port: U_C + R*I <= D_max*U_bus.
+            # A pre-existing U_C above that ceiling must NOT force a discharge.
+            if R > 1e-12:
+                charge_headroom_A = max(0.0, (converter_ceiling - U) / R)
+            else:
+                charge_headroom_A = m.I_max_A if U <= converter_ceiling else 0.0
+            voltage_limited[j] = bool(np.any(wanted_i > charge_headroom_A + 1e-9))
+            hi = min(hi, charge_headroom_A)
+            # Also avoid stepping the internal voltage past the converter's
+            # reachable charging voltage within a plant bin (including R = 0).
+            hi = min(hi, max(0.0, (converter_energy_ceiling - E) / (U * dt)))
+            ilim = bool(np.any(np.abs(wanted_i) > m.I_max_A))
+            current_limited[j] = ilim
+            requested_extreme[j] = wanted_i[int(np.argmax(np.abs(wanted_i)))]
+            # Bound actual current/energy, not just the plotted voltage.
+            lo = max(lo, (self.E_lo - E) / (U * dt))
+            hi = min(hi, (self.E_hi - E) / (U * dt))
+            actual_i = np.clip(wanted_i, lo, hi)
+            imean, i2 = float(actual_i.mean()), float(np.mean(actual_i ** 2))
+            pc = -(U + R * actual_i) * actual_i
+            bus = self._to_bus(pc)
+            req_bus = self._to_bus(requested)
+            unmet_discharge[j] = float(np.max(np.where(req_bus > 0, np.maximum(req_bus - bus, 0), 0)))
             loss = R * i2
-            E_new = E - (pc + loss) * dt if eloss else E - pc * dt
-            if E_new < Elo:
-                # at U_C0min the voltage is held, the SC current keeps flowing (limited only by I_C0max), the
-                # battery delivers the missing energy
-                overflow += (Elo - E_new) / dt * (ed if dis else 1.0)
-                E_new = Elo
-                t_lo += dt
-            elif E_new > Ehi:
-                overflow -= (E_new - Ehi) / dt / (ec if not dis else 1.0)
-                E_new = Ehi
-                t_hi += dt
-            E = E_new
-            if th:
-                dT = a_th * dT + (1.0 - a_th) * rth * (loss / npc)
-            E_loss += loss * dt
-            E_conv += abs(pc - ps) * dt
-            E_of += (overflow if overflow > 0 else -overflow) * dt
-            o_t[j] = t_base + k * dt
-            o_pl[j] = pl[k]
-            o_pb[j] = pb[k] + p_rech + overflow
-            o_ps[j] = ps
-            o_pr[j] = p_rech
-            o_u[j] = U
-            o_i[j] = sqrt(i2)
-            o_dT[j] = dT
-            o_of[j] = overflow
-            o_pc[j] = pc
-            o_is[j] = i
-            o_E[j] = E
-            o_ip[j] = ipk
-            o_ut[j] = U - R * i
-            o_ib[j] = ps / Ubus
-            k += 1
-            if k >= n:
-                k = 0
+            pcmean, ps = float(pc.mean()), float(bus.mean())
+            overflow = float((req_bus - bus).mean())
+            Enew = E - (pcmean + loss) * dt
+            # Roundoff only: all meaningful limiting was applied to current above.
+            self.E = min(self.E_hi, max(self.E_lo, Enew))
+            if self.thermal:
+                decay = math.exp(-dt / (m.R_th * m.C_th))
+                self.dT = decay * self.dT + (1 - decay) * m.R_th * loss / m.n_cells
+            st = self._stats
+            st['t_lo'] += dt if self.E <= self.E_lo + 1e-8 else 0
+            st['t_hi'] += dt if self.E >= self.E_hi - 1e-8 else 0
+            st['t_ilim'] += dt if ilim else 0
+            st['t_plim'] += dt if plim else 0
+            st['E_loss'] += loss * dt
+            st['E_of'] += float(np.mean(np.abs(req_bus - bus))) * dt
+            st['E_conv'] += float(np.mean(np.abs(pc - bus))) * dt
+            ot[j], opl[j], opb[j], ops[j] = self.elapsed, self.load.mean[k], self.load.mean[k] - ps, ps
+            opr[j] = float((self.raw_sc[k] - req_bus).mean())
+            ou[j], oi[j], odt[j], oof[j], opc[j] = U, math.sqrt(i2), self.dT, overflow, pcmean
+            ois[j], oe[j], oip[j] = imean, self.E, float(np.max(np.abs(actual_i)))
+            out[j], oib[j] = U + R * imean, -ps / cfg.U_bus_V
+            terminal_peak[j] = float(np.max(U + R * actual_i))
+            range_violation[j] = terminal_peak[j] > converter_ceiling + 1e-8
+            opi[j], oint[j] = ipi, self.pi.integral
+            oreq[j], oavail[j], olim[j], oduration[j] = float(requested.max()), available, plim, dt
+            raw_currents.append(actual_i)
+            self.last_current = float(actual_i[-1])
+            self.elapsed += dt
+            self.pos += 1
+            if self.pos == self.n:
+                self.pos = 0
                 self.cycle += 1
-                t_base = self.cycle * self.period
-        self.pos = k
-        for key, v in (("t_lo", t_lo), ("t_hi", t_hi), ("t_ilim", t_ilim), ("t_plim", t_plim), ("E_loss", E_loss),
-                       ("E_of", E_of), ("E_conv", E_conv)):
-            stats[key] += v
-        self.E, self.dT = E, dT
-        return CycleTrace(o_t, o_pl, o_pb, o_ps, o_pr, o_u, o_i, o_dT, o_of, o_pc, o_is, o_E, o_ip, o_ut, o_ib)
+        return CycleTrace(*fields, I_sc_full=np.concatenate(raw_currents) if raw_currents else np.array([]),
+                          voltage_limited=voltage_limited, U_term_peak=terminal_peak,
+                          converter_range_violation=range_violation, unmet_discharge_W=unmet_discharge,
+                          current_limited=current_limited, requested_current_extreme_A=requested_extreme)
 
-    def _reset_stats(self) -> None:
+    def _reset_stats(self):
         self._stats = dict(t_lo=0.0, t_hi=0.0, t_ilim=0.0, t_plim=0.0, E_loss=0.0, E_of=0.0, E_conv=0.0)
 
-    def run_cycle(self) -> tuple[CycleSummary, CycleTrace]:
-        """Advance exactly one profile period (from the current position)."""
+    def run_cycle(self):
         self._reset_stats()
-        U0, dT0, cyc = self.voltage(self.E), self.dT, self.cycle
+        U0, dT0, cyc, pi0 = self.voltage(self.E), self.dT, self.cycle, self.pi.integral
+        E0 = self.E
         tr = self._advance(self.n)
         st = self._stats
-        E0 = self.energy(U0)
+        rms = math.sqrt(float(np.average(tr.I_sc_rms ** 2, weights=tr.dt)))
         s = CycleSummary(
-            cycle=cyc, U_start=U0, U_end=self.voltage(self.E), U_min=float(tr.U_sc.min()),
-            U_max=float(tr.U_sc.max()), dT_start=dT0, dT_max=float(tr.dT.max()),
-            P_bat_max_W=float(tr.P_bat.max()), P_bat_min_W=float(tr.P_bat.min()),
-            P_bat_rms_W=float(np.sqrt(np.mean(tr.P_bat ** 2))), I_sc_rms_A=float(np.sqrt(np.mean(tr.I_sc_rms ** 2))),
-            I_sc_peak_A=float(np.max(tr.I_sc_peak)), E_loss_J=st["E_loss"], E_overflow_J=st["E_of"],
-            t_at_Umin_s=st["t_lo"], t_at_Umax_s=st["t_hi"], t_current_limit_s=st["t_ilim"],
-            E_conv_loss_J=st["E_conv"],
-            E_swing_J=float(max(tr.E_sc.max(), E0) - min(tr.E_sc.min(), E0)),
-            I_sc_rms_cell_A=float(np.sqrt(np.mean(tr.I_sc_rms ** 2))) / self.m.P,
-            U_term_min_V=float(tr.U_term.min()), t_power_limit_s=st["t_plim"],
-            t_Uconv_min_s=(float(np.sum(tr.U_term < self.cfg.U_conv_min_V)) * self.dt
-                           if self.cfg.U_conv_min_V else 0.0))
+            cycle=cyc, U_start=U0, U_end=self.voltage(self.E),
+            U_min=min(U0, self.voltage(float(tr.E_sc.min()))), U_max=max(U0, self.voltage(float(tr.E_sc.max()))),
+            dT_start=dT0, dT_max=float(tr.dT.max()), P_bat_max_W=float(tr.P_bat.max()),
+            P_bat_min_W=float(tr.P_bat.min()), P_bat_rms_W=float(np.sqrt(np.average(tr.P_bat ** 2, weights=tr.dt))),
+            I_sc_rms_A=rms, I_sc_peak_A=float(tr.I_sc_peak.max()), E_loss_J=st['E_loss'],
+            E_overflow_J=st['E_of'], t_at_Umin_s=st['t_lo'], t_at_Umax_s=st['t_hi'],
+            t_current_limit_s=st['t_ilim'], E_conv_loss_J=st['E_conv'],
+            E_swing_J=float(max(tr.E_sc.max(), E0) - min(tr.E_sc.min(), E0)), I_sc_rms_cell_A=rms / self.m.P,
+            U_term_min_V=float(tr.U_term.min()), t_power_limit_s=st['t_plim'],
+            t_Uconv_min_s=float(tr.dt[tr.U_term < self.cfg.U_conv_min_V].sum()) if self.cfg.U_conv_min_V else 0,
+            pi_integral_start_A=pi0, pi_integral_end_A=self.pi.integral,
+            t_bus_voltage_limit_s=float(tr.dt[tr.voltage_limited].sum()),
+            t_converter_range_s=float(tr.dt[tr.converter_range_violation].sum()))
         self.history.append(s)
         return s, tr
 
-    def cell_current_full(self, trace: CycleTrace, p_load: np.ndarray, p_bat: np.ndarray,
-                          dt_full: float) -> np.ndarray:
-        """Cell current at full time resolution for one periodic cycle.
+    def cell_current_full(self, trace, p_load, p_bat, dt_full):
+        """Actual, limited charge-positive current, including recharge and voltage boundaries."""
+        if trace.I_sc_full is None:
+            raise ValueError("Trace does not contain the actual full-resolution SC current")
+        return trace.I_sc_full / self.m.P
 
-        P_bus,SC(t) - P_rech -> P_SC(t) with the converter efficiency -> I_SC(t) from P_SC = (U_C - R I) I with
-        U_C of the step (power balance U_bus I_bus = U_SC I_SC), limited to I_max, divided by P.
-        """
-        k = max(1, int(round(self.dt / dt_full)))
-        n = self.n * k
-        p_sc_bus = (p_load - p_bat)[:n]
-        rech = np.repeat(trace.P_rech, k)[: len(p_sc_bus)]
-        U = np.repeat(trace.U_sc, k)[: len(p_sc_bus)]
-        ps = p_sc_bus - rech
-        pc = np.where(ps > 0, ps / self.cfg.eta_dch, ps * self.cfg.eta_ch)
-        i_mod, _ = current_array(pc, U, self.R_mod)
-        i_mod = np.clip(i_mod, -self.m.I_max_A, self.m.I_max_A)
-        return i_mod / self.m.P
-
-    def run_until_steady(self, max_cycles: Optional[int] = None, accelerate_thermal: bool = True
-                         ) -> tuple[list[CycleSummary], CycleTrace]:
-        """Repeat the profile until U and dT are periodic. Returns all summaries and the last trace."""
-        max_cycles = max_cycles or self.cfg.max_cycles
-        tr = None
-        for _ in range(max_cycles):
+    def run_until_steady(self, max_cycles=None, accelerate_thermal=True):
+        stable = 0
+        self.converged = False
+        for _ in range(max_cycles or self.cfg.max_cycles):
             s, tr = self.run_cycle()
             u_ok = abs(s.U_end - s.U_start) < self.cfg.tol_U_V
-            t_ok = (not self.thermal) or abs(self.dT - s.dT_start) < self.cfg.tol_T_K
-            if u_ok and t_ok:
+            pi_ok = abs(s.pi_integral_end_A - s.pi_integral_start_A) < self.cfg.tol_pi_A
+            t_ok = not self.thermal or abs(self.dT - s.dT_start) < self.cfg.tol_T_K
+            stable = stable + 1 if u_ok and pi_ok and t_ok else 0
+            if stable >= 2:
+                self.converged = True
                 break
-            if u_ok and self.thermal and accelerate_thermal and len(self.history) >= 2:
+            if u_ok and pi_ok and self.thermal and accelerate_thermal and len(self.history) >= 2:
                 aN = math.exp(-self.period / (self.m.R_th * self.m.C_th))
-                F = self.dT - aN * s.dT_start
-                self.dT = F / (1.0 - aN)
+                self.dT = (self.dT - aN * s.dT_start) / (1 - aN)
         return self.history, tr
 
-    def stream(self, chunk_s: float = 5.0) -> Iterator[CycleTrace]:
-        """Endless generator: yields the next chunk of the emulation, forever."""
-        n = max(1, int(round(chunk_s / self.dt)))
+    def stream(self, chunk_s=5.0) -> Iterator[CycleTrace]:
         while True:
             self._reset_stats()
-            yield self._advance(n)
+            yield self._advance(max(1, int(round(chunk_s / self.dt))))
 
 
-def module_from_candidate(row: dict, U_min: float, U_max: float, U_init: float, I_C0max: float,
-                          fit: Optional[dict] = None, use_cu: bool = False) -> ModuleModel:
-    """Module model for the emulation. SC current limit = min(I_C0max, P I_cell,max)."""
+def module_from_candidate(row, U_min, U_max, U_init, I_C0max, fit=None, use_cu=False):
     kw = {}
     if use_cu and fit is not None:
-        kw = dict(C0_cell_F=float(fit["C0_F"]), k_cell_FperV=float(fit["k_FperV"]))
-    rth, cth = row.get("R_th_KperW"), row.get("C_th_JperK")
+        kw = dict(C0_cell_F=float(fit['C0_F']), k_cell_FperV=float(fit['k_FperV']))
+    rth, cth = row.get('R_th_KperW'), row.get('C_th_JperK')
     ok = rth is not None and not (isinstance(rth, float) and math.isnan(rth))
-    return ModuleModel(S=int(row["S"]), P=int(row["P"]), C_cell_F=float(row["C_cell_used_F"]),
-                       R_cell_Ohm=float(row["ESR_cell_mOhm"]) / 1000, U_min=U_min, U_max=U_max, U_init=U_init,
-                       I_max_A=min(float(I_C0max), float(row["I_module_max_A"])),
+    return ModuleModel(S=int(row['S']), P=int(row['P']), C_cell_F=float(row['C_cell_used_F']),
+                       R_cell_Ohm=float(row['ESR_cell_mOhm']) / 1000, U_min=U_min, U_max=U_max, U_init=U_init,
+                       I_max_A=min(float(I_C0max), float(row['I_module_max_A'])),
                        R_th=float(rth) if ok else None, C_th=float(cth) if ok else None,
                        label=f"{row['cell_id']} {row['P']}/{row['S']}", **kw)

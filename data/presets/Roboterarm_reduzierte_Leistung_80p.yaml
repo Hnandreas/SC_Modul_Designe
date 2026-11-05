@@ -1,0 +1,163 @@
+name: Roboterarm_reduzierte_Leistung_80p
+description: 'Dissertation extension: same procedure, but characterized cell parameters
+  where available. C_eq,E from C0 and k (90-20 % window, highest measured current),
+  ESR from the recursive method M4 (fallback M3, M2, M1, then datasheet) and thermal
+  verification with R_th/C_th. Cells without own thermal data use R_th/C_th of the
+  characterized 50 F cell scaled to their size (warning). Thermal check for a packed
+  module block without forced cooling and with end-of-life ESR (x 2). Selected: 50
+  F.'
+profile:
+  path: data/profiles/private/robot_arm_profile.npz
+  scale: 0.8
+  time_col: null
+  power_col: null
+  phase_factor: 1.0
+  t_start: null
+  t_end: null
+  resample_dt: null
+manual_load:
+  use: if_no_profile
+  P_peak_W: 2643.0
+  P_avg_W: 392.3
+  E_dch_J: 1214.1
+  E_ch_J: 557.0
+split:
+  name: moving_average
+  params:
+    window_s: 20.0
+    alignment: legacy_matlab
+braking:
+  enabled: true
+  mode: kinematic
+  mass_kg: 880.0
+  v_mps: 1.5
+  t_brake_s: 1.5
+  E_J: null
+  P_W: null
+req:
+  U_bus_V: 48.0
+  U_C0max_V: 48.0
+  P_max_mode: peak_minus_avg
+  P_max_W: null
+  I_C0max_A: 90.0
+  I_C0max_confirmed: true
+  U_C0min_mode: fixed
+  r_Q: 0.5
+  U_C0min_override_V: 33.0
+  U_conv_min_V: null
+  U_bus_min_V: null
+  T_cell_C: 65.0
+  t_life_h: 40000.0
+  L_EOL: 0.7
+  T_amb_C: 25.0
+  dT_max_K: 40.0
+  eta_dch: 1.0
+  eta_ch: 1.0
+  max_width_mm: null
+  max_depth_mm: null
+  max_height_mm: null
+  max_volume_dm3: null
+  max_mass_kg: null
+  max_cost_EUR: null
+opt:
+  energy_method: zero_crossing_legacy
+  scenarios:
+  - profile
+  - profile_braking
+  series_override: null
+  candidate_ids: null
+  c_source: ceq_M1
+  cfit_range: 90-20
+  cfit_current: highest
+  cfit_dataset: auto
+  esr_source: measured
+  esr_methods:
+  - M4
+  - M3
+  - M2
+  - M1
+  esr_current: highest
+  geometry: pcb
+  packing_factor: 1.0
+  packing: hex
+  pcb_orientation: long
+  pcb_group_shape: row
+  pcb_bands: 2
+  pcb_margin_mm: 5.0
+  pcb_clearance_mm: 3.0
+  pcb_target_aspect: 2.0
+  pcb_areal_mass_g_cm2: 0.35
+  conn_power_w_mm: 25.0
+  conn_power_d_mm: 15.0
+  conn_signal_w_mm: 0.0
+  conn_signal_d_mm: 0.0
+  thermal_mode: proxy_scaled
+  thermal_current: energy_balance
+  thermal_profile: periodic
+  thermal_coupling: packed_block
+  thermal_coupling_factor: 1.0
+  cell_spacing_mm: 1.0
+  thermal_esr_factor: 2.0
+  thermal_dt_bin_s: 0.01
+  P_limit: 200
+  weight_preset: custom
+  weights:
+    cost: 2.0
+    mass: 1.0
+    volume: 1.0
+    losses: 0.75
+    thermal: 1.0
+    cells: 1.5
+    reserve: 0.5
+    data: 0.0
+  reserve_cap: 0.3
+  include_esr_losses: true
+  thermal_network: true
+  net_radiation: true
+  net_eps: 0.05
+  net_lambda: 0.026
+  net_use_for_design: false
+  thermal_adjust_P: false
+  power_adjust_P: false
+selected:
+  profile:
+    cell_id: VISHAY_HVR235_50F
+  profile_braking:
+    cell_id: VISHAY_HVR235_50F
+reference: {}
+ui_state:
+  emu_auto_tune: Nachladestrom und Moving Average
+  emu_cells_profile_braking_VISHAY_HVR235_50F:
+  - VISHAY_HVR235_50F
+  emu_cons: false
+  emu_curve_aging: true
+  emu_dt: 0.01
+  emu_etac: 100.0
+  emu_etad: 100.0
+  emu_fsw: 100.0
+  emu_init_profile_braking: 44.0
+  emu_ma_window: 20.0
+  emu_pi_divider: 5
+  emu_pi_ki: 0.5
+  emu_pi_kp: 0.2
+  emu_pi_negative: 5.0
+  emu_pi_positive: 5.0
+  emu_power_check: true
+  emu_ref_profile_braking: 44.0
+  emu_scen: profile_braking
+  emu_th: true
+  mc_ref: selected
+  mc_sb: cost_EUR
+  mc_st: volume_dm3
+  mc_yb: volume_dm3
+  mc_yt: cost_EUR
+  meas_in: 0.0
+  meas_out: 0.0
+  net_tend: 120
+  ni_arr: hex
+  ni_n: 3
+  ni_p: 0.7
+  ni_rad: true
+  ni_s: 0.0
+  px: cost_EUR
+  py: P_loss_avg_W

@@ -216,3 +216,53 @@ def load_plugins(force: bool = False) -> list[str]:
                 print(f"[plugins] {f.name} failed: {exc}")
     _PLUGINS_LOADED = True
     return loaded
+
+
+def periodic_emulation_split(name, t, p, params=None):
+    """Periodic continuation for emulation only; analytic/reference splits stay unchanged.
+
+    Causal filter states are solved at the periodic boundary. No zero padding or
+    fresh filter startup is inserted every time the recorded profile wraps.
+    """
+    args = get_split(name).defaults()
+    args.update(params or {})
+    if name == 'moving_average':
+        args['alignment'] = 'periodic_causal'
+        return apply_split(name, t, p, args)
+    if name in ('lowpass_1st', 'butterworth'):
+        fs = 1 / float(t[1] - t[0])
+        order = int(args.get('order', 1))
+        if name == 'lowpass_1st':
+            a = np.exp(-2 * np.pi * args['fc_Hz'] / fs)
+            out, z = signal.lfilter([1 - a], [1, -a], p, zi=[0.0])
+            den = -np.expm1(len(p) * np.log(a)) if a > 0 else 1.0
+            out, _ = signal.lfilter([1 - a], [1, -a], p, zi=z / den)
+        else:
+            sos = signal.butter(order, args['fc_Hz'], fs=fs, output='sos')
+            shape = (len(sos), 2)
+            _, z0 = signal.sosfilt(sos, p, zi=np.zeros(shape))
+            size = z0.size
+            matrix = np.empty((size, size))
+            for j in range(size):
+                basis = np.zeros(size)
+                basis[j] = 1
+                _, zj = signal.sosfilt(sos, p, zi=basis.reshape(shape))
+                matrix[:, j] = (zj - z0).ravel()
+            initial = np.linalg.solve(np.eye(size) - matrix, z0.ravel()).reshape(shape)
+            out, _ = signal.sosfilt(sos, p, zi=initial)
+        return out, p - out
+    if name == 'rate_limiter':
+        from scipy.optimize import brentq
+        step = args['max_slope_W_per_s'] * (t[1] - t[0])
+        def run(initial):
+            out = np.empty_like(p)
+            y = initial
+            for j, value in enumerate(p):
+                y += np.clip(value - y, -step, step)
+                out[j] = y
+            return out
+        lo, hi = float(np.min(p)), float(np.max(p))
+        initial = lo if lo == hi else brentq(lambda v: run(v)[-1] - v, lo, hi)
+        out = run(initial)
+        return out, p - out
+    return apply_split(name, t, p, args)
